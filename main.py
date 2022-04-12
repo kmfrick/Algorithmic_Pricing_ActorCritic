@@ -122,6 +122,7 @@ def main():
     beta = 3e-3
     seeds = [54321, 50321, 12345, 9827391, 8534101, 4305430, 12654329, 3483055, 348203, 2356, 250917, 200822, 151515, 50505, 301524]
     max_t = int(1e3)
+    ir_periods = 20
     #torch.autograd.set_detect_anomaly(True)
     for session in range(len(seeds)):
         # Random seeds
@@ -179,12 +180,30 @@ def main():
                         target_param.data.copy_(
                             target_param.data * (1.0 - tau) + param.data * tau
                         )
-
-
-
-
-
         np.save(f"{out_dir}/session_reward_{seeds[session]}.npy", total_reward)
+        ir_profits = np.zeros([n_agents, ir_periods])
+        ir_prices = np.zeros([n_agents, ir_periods])
+        # Impulse response
+        for t in range(ir_periods):
+            for i in range(n_agents):
+                p = net[i].actor(state)
+                price[i] = (p + c).detach().numpy()
+                ir_prices[i, t] = price[i]
+            if t == 0:
+                price[0] = nash_price
+                ir_prices[0, 0] = nash_price
+            quant = np.exp((ai - price)/mu) / (np.sum(np.exp((ai - price)/mu)) + np.exp(a0/mu))
+            ir_profits[:, t] = (price - c) * quant
+            state = torch.tensor(price)
+        np.save(f"{out_dir}/ir_profits_{seeds[session]}.npy", ir_profits)
+        np.save(f"{out_dir}/ir_prices_{seeds[session]}.npy", ir_prices)
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
