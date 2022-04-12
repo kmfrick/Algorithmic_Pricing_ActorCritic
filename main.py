@@ -120,7 +120,7 @@ def main():
     lr_decay = 0.995
     nash_price = 1.47
     beta = 3e-3
-    seeds = [54321, 50321, 12345, 9827391, 8534101, 4305430, 12654329, 3483055, 348203, 2356, 250917, 200822, 151515, 50505, 301524]
+    seeds = [12345]#54321, 50321, 9827391, 8534101, 4305430, 12654329, 3483055, 348203, 2356, 250917, 200822, 151515, 50505, 301524]
     max_t = int(1e3)
     ir_periods = 20
     #torch.autograd.set_detect_anomaly(True)
@@ -144,11 +144,13 @@ def main():
         state = torch.sigmoid(torch.randn(n_agents)) + c
         price = np.zeros([n_agents])
         total_reward = np.zeros([n_agents, max_t])
+        price_history = np.zeros([n_agents, max_t])
         collusive_t = 0
         for t in tqdm(range(max_t)):
             for i in range(n_agents):
                 p = net[i].actor(state)
                 price[i] = (p + c + D.Normal(0, np.exp(- beta * t)).sample()).detach().numpy()
+                price_history[i, t] = price[i]
             quant = np.exp((ai - price)/mu) / (np.sum(np.exp((ai - price)/mu)) + np.exp(a0/mu))
             profits = (price - c) * quant
             for i in range(n_agents):
@@ -189,9 +191,9 @@ def main():
                 p = net[i].actor(state)
                 price[i] = (p + c).detach().numpy()
                 ir_prices[i, t] = price[i]
-            if t == 0:
+            if t == (ir_periods / 2):
                 price[0] = nash_price
-                ir_prices[0, 0] = nash_price
+                ir_prices[0, t] = nash_price
             quant = np.exp((ai - price)/mu) / (np.sum(np.exp((ai - price)/mu)) + np.exp(a0/mu))
             ir_profits[:, t] = (price - c) * quant
             state = torch.tensor(price)
