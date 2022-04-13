@@ -66,11 +66,14 @@ def main():
     plt.plot(np.load(f"{out_dir}/{lr}")[0, :])
     plt.title("LR")
     plt.show()
+    load_and_plot(files, out_dir, "actor_loss", 0, 0, 100, "Actor Loss")
+    load_and_plot(files, out_dir, "actor_norm", 0, 1, 10, "Actor Grad Norm")
     load_and_plot(files, out_dir, "critic_loss", 0, 0, 100, "Critic Loss")
+    load_and_plot(files, out_dir, "critic_norm", 0, 1, 10, "Critic Grad Norm")
     load_and_plot(files, out_dir, "session", nash, coop, 100, "Rewards")
     load_and_plot(files, out_dir, "ir_profits", nash, coop, 1, "IR Profits", True)
     load_and_plot(files, out_dir, "ir_prices", nash_price, coop_price, 1, "IR Prices", True)
-    load_and_plot(files, out_dir, "grad_norm", 0, 1, 10, "Grad Norm")
+
     load_and_heatmap(files, out_dir, "actions_final", "Actions")
     load_and_heatmap(files, out_dir, "values_final", "Values")
 

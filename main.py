@@ -24,35 +24,48 @@ def fanin_init(size, fanin=None):
     return torch.Tensor(size).uniform_(-v, v)
 
 
-"""
-Actor-Critic NN
-Adapted from https://github.com/vy007vikas/PyTorch-ActorCriticRL
-"""
-class ActorCriticNetwork(nn.Module):
+class ActorNetwork(nn.Module):
     def __init__(self, state_dim):
         EPS = 3e-3
-        super(ActorCriticNetwork, self).__init__()
+        super(ActorNetwork, self).__init__()
         self.state_dim = state_dim
         self.action_lim = 1
-        # Common first layer
         self.fc1 = nn.Linear(state_dim, 256)
         self.fc1.weight.data = fanin_init(self.fc1.weight.data.size())
         self.fc2 = nn.Linear(256, 128)
         self.fc2.weight.data = fanin_init(self.fc2.weight.data.size())
-        # Critic layers
+        self.fc_actor3 = nn.Linear(128, 64)
+        self.fc_actor3.weight.data = fanin_init(self.fc_actor3.weight.data.size())
+        self.fc_actor4 = nn.Linear(64, 1)
+        self.fc_actor4.weight.data.uniform_(-EPS, EPS)
+
+    def forward(self, state):
+        state = state.float()
+        x = F.relu(self.fc1(state))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc_actor3(x))
+        x = torch.sigmoid(self.fc_actor4(x)) * self.action_lim
+        return x
+
+
+class CriticNetwork(nn.Module):
+    def __init__(self, state_dim):
+        EPS = 3e-3
+        super(CriticNetwork, self).__init__()
+        self.state_dim = state_dim
+        self.action_lim = 1
+        self.fc1 = nn.Linear(state_dim, 256)
+        self.fc1.weight.data = fanin_init(self.fc1.weight.data.size())
+        self.fc2 = nn.Linear(256, 128)
+        self.fc2.weight.data = fanin_init(self.fc2.weight.data.size())
         self.fc_critic_a = nn.Linear(1, 128)
         self.fc_critic_a.weight.data = fanin_init(self.fc_critic_a.weight.data.size())
         self.fc_critic2 = nn.Linear(256, 128)
         self.fc_critic2.weight.data = fanin_init(self.fc_critic2.weight.data.size())
         self.fc_critic3 = nn.Linear(128, 1)
         self.fc_critic3.weight.data.uniform_(-EPS, EPS)
-        # Actor layers
-        self.fc_actor3 = nn.Linear(128, 64)
-        self.fc_actor3.weight.data = fanin_init(self.fc_actor3.weight.data.size())
-        self.fc_actor4 = nn.Linear(64, 1)
-        self.fc_actor4.weight.data.uniform_(-EPS, EPS)
 
-    def critic(self, state, action):
+    def forward(self, state, action):
         state = state.float()
         action = action.float()
         s1 = F.relu(self.fc1(state))
@@ -63,19 +76,6 @@ class ActorCriticNetwork(nn.Module):
         x = self.fc_critic3(x)
         return x
 
-    def actor(self, state):
-        state = state.float()
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc_actor3(x))
-        action = torch.sigmoid(self.fc_actor4(x))
-        action = action * self.action_lim
-        return action
-
-    def forward(self, state):
-        a = self.actor(state)
-        v = self.critic(state, a)
-        return a, v
 
 
 def compute_profit(ai, a0, mu, c, p):
@@ -91,7 +91,7 @@ def compute_profit_derivative(ai, a0, mu, c, p, h):
     return (f(p + h) - f(p - h)) / (2 * h)
 
 
-def optimize(batch_size, buffer, net, optimizer, scheduler, target_net):
+def optimize(batch_size, buffer, net_actor, net_critic, target_net_actor, target_net_critic, optimizer_actor, optimizer_critic, scheduler_actor, scheduler_critic):
     DISCOUNT = 0.95
     TARGET_LR = 0.001
     batch = random.sample(buffer, min(len(buffer), batch_size))
@@ -99,37 +99,47 @@ def optimize(batch_size, buffer, net, optimizer, scheduler, target_net):
     a = torch.tensor(np.float32([arr[1] for arr in batch]))
     r = torch.tensor(np.float32([arr[2] for arr in batch]))
     s1 = torch.tensor(np.float32([arr[3] for arr in batch]))
-    a1 = target_net.actor(s1).detach()
-    next_val = target_net.critic(s1, a1).detach().squeeze()
+    a1 = target_net_actor(s1).detach()
+    next_val = target_net_critic(s1, a1).detach().squeeze()
     y_exp = r + DISCOUNT * next_val
     #print(f"exp = {torch.mean(y_exp)}")
-    y_pred = net.critic(s, a.unsqueeze(0).mT).squeeze()
+    y_pred = net_critic(s, a.unsqueeze(0).mT).squeeze()
     #print(f"pred = {torch.mean(y_pred)}")
-    l_critic = F.smooth_l1_loss(y_pred, y_exp)
-    optimizer.zero_grad()
+    l_critic = F.smooth_l1_loss(y_pred.squeeze(), y_exp.squeeze())
+    optimizer_critic.zero_grad()
     l_critic.backward()
-    #torch.nn.utils.clip_grad_norm_(net.parameters(), 1)
-    #torch.nn.utils.clip_grad_norm_(target_net.parameters(), 1)
-    optimizer.step()
-    pred_a = net.actor(s)
-    pred_v = net.critic(s, pred_a)
+    torch.nn.utils.clip_grad_norm_(net_critic.parameters(), 1)
+    torch.nn.utils.clip_grad_norm_(target_net_critic.parameters(), 1)
+    optimizer_critic.step()
+    pred_a = net_actor(s)
+    pred_v = net_critic(s, pred_a)
     l_actor = -torch.sum(pred_v)
-    optimizer.zero_grad()
+    optimizer_actor.zero_grad()
     l_actor.backward()
-    #torch.nn.utils.clip_grad_norm_(net.parameters(), 1)
-    #torch.nn.utils.clip_grad_norm_(target_net.parameters(), 1)
-    optimizer.step()
+    torch.nn.utils.clip_grad_norm_(net_critic.parameters(), 1)
+    torch.nn.utils.clip_grad_norm_(target_net_critic.parameters(), 1)
+    torch.nn.utils.clip_grad_norm_(net_actor.parameters(), 1)
+    torch.nn.utils.clip_grad_norm_(target_net_actor.parameters(), 1)
+    optimizer_actor.step()
     # Decay LR
-    scheduler.step()
-    total_norm = 0
-    for target_param, param in zip(target_net.parameters(), net.parameters()):
+    scheduler_actor.step()
+    scheduler_critic.step()
+    actor_norm = 0
+    critic_norm = 0
+    for target_param, param in zip(target_net_actor.parameters(), net_actor.parameters()):
         target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
-        param_norm = param.grad.detach().data.norm(2)
-        total_norm += param_norm.item() ** 2
-    return l_critic.item(), scheduler.get_last_lr()[0], total_norm
+        if param.grad is not None:
+            param_norm = param.grad.detach().data.norm(2)
+            actor_norm += param_norm.item() ** 2
+    for target_param, param in zip(target_net_critic.parameters(), net_critic.parameters()):
+        target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
+        if param.grad is not None:
+            param_norm = param.grad.detach().data.norm(2)
+            critic_norm += param_norm.item() ** 2
+    return l_actor.item(), l_critic.item(), actor_norm, critic_norm, scheduler_critic.get_last_lr()[0]
 
 
-def save_actions(net, n_agents, c, fpostfix, out_dir):
+def save_actions(net_actor, net_critic, n_agents, c, fpostfix, out_dir):
     grid_size = 100
     w = np.linspace(c, c + 2, grid_size)
     for i in range(n_agents):
@@ -138,8 +148,10 @@ def save_actions(net, n_agents, c, fpostfix, out_dir):
         for ai, p1 in enumerate(w):
             for aj, p2 in enumerate(w):
                 state = torch.tensor(np.array([p1, p2]))
-                a = net[i].actor(state)
+                a = net_actor[i](state)
+                #q = net_critic[i](state, a)
                 A[ai, aj] = a.detach().numpy()
+                #Q[ai, aj] = q.detach().numpy()
         np.save(f"{out_dir}/actions_{fpostfix}_{i}.npy", A)
         #np.save(f"{out_dir}/values_{fpostfix}_{i}.npy", Q)
 
@@ -172,34 +184,37 @@ def main():
         torch.manual_seed(seeds[session])
         # Initialize replay buffers and NNs
         buffer = []
-        net = []
-        target_net = []
+        net_actor = []
+        net_critic = []
         for i in range(n_agents):
-            net.append(ActorCriticNetwork(n_agents))
-            target_net.append(ActorCriticNetwork(n_agents))
-            for target_param, param in zip(target_net[i].parameters(), net[i].parameters()):
-                target_param.data.copy_(param.data)
+            net_actor.append(ActorNetwork(n_agents))
+            net_critic.append(CriticNetwork(n_agents))
             buffer.append(deque(maxlen=BATCH_SIZE * 2))
+        target_net_actor = copy.deepcopy(net_actor)
+        target_net_critic = copy.deepcopy(net_critic)
         # Initial state is random, but ensure prices are above marginal cost
         state = torch.sigmoid(torch.randn(n_agents)) + c
-        print(state)
         # initial state-action mappings
-        save_actions(net, n_agents, c, f"initial_{fpostfix}", out_dir)
+        save_actions(net_actor, net_critic, n_agents, c, f"initial_{fpostfix}", out_dir)
         # One optimizer per network
-        optimizer = [torch.optim.AdamW(n.parameters(), lr=INITIAL_LR) for n in net]
+        optimizer_actor = [torch.optim.AdamW(n.parameters(), lr=INITIAL_LR) for n in net_actor]
+        optimizer_critic = [torch.optim.AdamW(n.parameters(), lr=INITIAL_LR) for n in net_critic]
         # One scheduler per network
-        scheduler = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY) for o in optimizer]
+        scheduler_actor = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY) for o in optimizer_actor]
+        scheduler_critic = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY) for o in optimizer_critic]
 
         price = np.zeros([n_agents])
         total_reward = np.zeros([n_agents, MAX_T])
         price_history = np.zeros([n_agents, MAX_T])
-        grad_norm = np.zeros([n_agents, MAX_T])
+        actor_norm = np.zeros([n_agents, MAX_T])
+        critic_norm = np.zeros([n_agents, MAX_T])
         net_lr = np.zeros([n_agents, MAX_T])
         net_lr[:, 0] = INITIAL_LR
+        actor_loss = np.zeros([n_agents, MAX_T])
         critic_loss = np.zeros([n_agents, MAX_T])
         for t in tqdm(range(MAX_T)):
             for i in range(n_agents):
-                p = net[i].actor(state)
+                p = net_actor[i](state)
                 price[i] = (p + c + D.Normal(0, np.exp(- EXPLORATION_DECAY * t)).sample()).detach().numpy()
                 price_history[i, t] = price[i]
             profits = compute_profit(ai, a0, mu, c, price)
@@ -208,22 +223,25 @@ def main():
                 buffer[i].append(transition)
                 total_reward[i, t] = profits[i]
             state = torch.tensor(price)
-            if t > 0:  # At least one experience in the buffer
-                for i in range(n_agents):
-                    cl, nlr, gn = optimize(BATCH_SIZE, buffer[i], net[i], optimizer[i], scheduler[i], target_net[i])
-                    net_lr[i, t] = nlr
-                    grad_norm[i, t] = gn
-                    critic_loss[i, t] = cl
+            for i in range(n_agents):
+                al, cl, an, cn, nlr = optimize(BATCH_SIZE, buffer[i], net_actor[i], net_critic[i], target_net_actor[i], target_net_critic[i], optimizer_actor[i], optimizer_critic[i], scheduler_actor[i], scheduler_critic[i])
+                net_lr[i, t] = nlr
+                actor_norm[i, t] = an
+                critic_norm[i, t] = cn
+                actor_loss[i, t] = al
+                critic_loss[i, t] = cl
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward)
-        np.save(f"{out_dir}/grad_norm_{fpostfix}.npy", grad_norm)
         np.save(f"{out_dir}/net_lr_{fpostfix}.npy", net_lr)
+        np.save(f"{out_dir}/critic_norm_{fpostfix}.npy", critic_norm)
         np.save(f"{out_dir}/critic_loss_{fpostfix}.npy", critic_loss)
+        np.save(f"{out_dir}/actor_norm_{fpostfix}.npy", actor_norm)
+        np.save(f"{out_dir}/actor_loss_{fpostfix}.npy", actor_loss)
         # Impulse response
         ir_profits = np.zeros([n_agents, ir_periods])
         ir_prices = np.zeros([n_agents, ir_periods])
         for t in range(ir_periods):
             for i in range(n_agents):
-                p = net[i].actor(state)
+                p = net_actor[i](state)
                 price[i] = (p + c).detach().numpy()
                 ir_prices[i, t] = price[i]
             if (ir_periods / 2) <= t <= (ir_periods / 2 + 3):
@@ -234,7 +252,7 @@ def main():
         np.save(f"{out_dir}/ir_profits_{fpostfix}.npy", ir_profits)
         np.save(f"{out_dir}/ir_prices_{fpostfix}.npy", ir_prices)
         # final state-action mappings
-        save_actions(net, n_agents, c, f"final_{fpostfix}", out_dir)
+        save_actions(net_actor, net_critic, n_agents, c, f"final_{fpostfix}", out_dir)
 
 
 
