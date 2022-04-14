@@ -171,6 +171,11 @@ def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_ac
         if param.grad is not None:
             param_norm = param.grad.detach().data.norm(2)
             critic_norm += param_norm.item() ** 2
+    for target_param, param in zip(target_net_value.parameters(), net_value.parameters()):
+        target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
+        if param.grad is not None:
+            param_norm = param.grad.detach().data.norm(2)
+            critic_norm += param_norm.item() ** 2
 
     return policy_loss, qf_loss, actor_norm, critic_norm
 
@@ -213,7 +218,7 @@ def main():
     INITIAL_LR_ACTOR = 3e-4
     INITIAL_LR_CRITIC = 3e-5
     INITIAL_LR_VALUE = 3e-5
-    MAX_T = int(1e3)
+    MAX_T = int(5e3)
     LR_DECAY_ACTOR = 0.999
     LR_DECAY_CRITIC = 1
     LR_DECAY_VALUE = 1
