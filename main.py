@@ -39,8 +39,8 @@ class ValueNetwork(nn.Module):
         state = state.float()
         x = F.relu(self.linear1(state))
         x = F.relu(self.linear2(x))
-        x = self.linear3(x)
-        return x
+        mean = self.linear3(x)
+        return mean
 
 
 class QNetwork(nn.Module):
@@ -111,7 +111,7 @@ def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_ac
     reward_batch = torch.FloatTensor(reward_batch).unsqueeze(1)
 
     with torch.no_grad():
-        vf_next_target = net_value(next_state_batch)
+        vf_next_target = target_net_value(next_state_batch)
         next_q_value = reward_batch + DISCOUNT * (vf_next_target)
     action_batch = action_batch.unsqueeze(1)
     qf1, qf2 = net_critic(state_batch,
@@ -213,7 +213,7 @@ def main():
     INITIAL_LR_ACTOR = 3e-4
     INITIAL_LR_CRITIC = 3e-5
     INITIAL_LR_VALUE = 3e-5
-    MAX_T = int(1e4)
+    MAX_T = int(1e3)
     LR_DECAY_ACTOR = 0.999
     LR_DECAY_CRITIC = 1
     LR_DECAY_VALUE = 1
@@ -239,7 +239,7 @@ def main():
             buffer.append(deque(maxlen=BUF_SIZE))
         target_net_actor = copy.deepcopy(net_actor)
         target_net_critic = copy.deepcopy(net_critic)
-        target_net_value = copy.deepcopy(net_critic)
+        target_net_value = copy.deepcopy(net_value)
         # Initial state is random, but ensure prices are above marginal cost
         state = torch.sigmoid(torch.randn(n_agents)) + c
         # initial state-action mappings
