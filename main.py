@@ -30,15 +30,19 @@ class ValueNetwork(nn.Module):
         super(ValueNetwork, self).__init__()
 
         self.linear1 = nn.Linear(num_inputs, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, 1)
 
         self.apply(weights_init_)
 
     def forward(self, state):
         state = state.float()
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
+        x = F.leaky_relu(self.linear1(state))
+        x = self.bn1(x)
+        x = F.leaky_relu(self.linear2(x))
+        x = self.bn2(x)
         mean = self.linear3(x)
         return mean
 
@@ -49,12 +53,16 @@ class QNetwork(nn.Module):
 
         # Q1 architecture
         self.linear1 = nn.Linear(num_inputs + num_actions, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, 1)
 
         # Q2 architecture
         self.linear4 = nn.Linear(num_inputs + num_actions, hidden_dim)
+        self.bn3 = nn.BatchNorm1d(hidden_dim)
         self.linear5 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn4 = nn.BatchNorm1d(hidden_dim)
         self.linear6 = nn.Linear(hidden_dim, 1)
 
         self.apply(weights_init_)
@@ -64,12 +72,16 @@ class QNetwork(nn.Module):
         action = action.float()
         xu = torch.cat([state, action], 1)
 
-        x1 = F.relu(self.linear1(xu))
-        x1 = F.relu(self.linear2(x1))
+        x1 = F.leaky_relu(self.linear1(xu))
+        x1 = self.bn1(x1)
+        x1 = F.leaky_relu(self.linear2(x1))
+        x2 = self.bn2(x1)
         x1 = self.linear3(x1)
 
-        x2 = F.relu(self.linear4(xu))
-        x2 = F.relu(self.linear5(x2))
+        x2 = F.leaky_relu(self.linear4(xu))
+        x2 = self.bn3(x2)
+        x2 = F.leaky_relu(self.linear5(x2))
+        x2 = self.bn4(x2)
         x2 = self.linear6(x2)
 
         return x1, x2
@@ -78,9 +90,10 @@ class QNetwork(nn.Module):
 class GaussianPolicy(nn.Module):
     def __init__(self, num_inputs, num_actions, hidden_dim):
         super(GaussianPolicy, self).__init__()
-
         self.linear1 = nn.Linear(num_inputs, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
 
         self.mean_linear = nn.Linear(hidden_dim, num_actions)
         self.log_std_linear = nn.Linear(hidden_dim, num_actions)
@@ -91,17 +104,19 @@ class GaussianPolicy(nn.Module):
         state = state.float()
         LOG_SIG_MAX = 2
         LOG_SIG_MIN = -20
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
+        x = F.leaky_relu(self.linear1(state))
+        x = self.bn1(x)
+        x = F.leaky_relu(self.linear2(x))
+        x = self.bn2(x)
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)
         log_std = torch.sigmoid(log_std) * np.abs(LOG_SIG_MAX - LOG_SIG_MIN) + LOG_SIG_MIN
         return mean, log_std
 
-def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_actor, target_net_critic, target_net_value, optimizer_actor, optimizer_critic, optimizer_value, scheduler_actor, scheduler_critic, scheduler_value):
+def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_value, optimizer_actor, optimizer_critic, optimizer_value, scheduler_actor, scheduler_critic, scheduler_value):
     DISCOUNT = 0.95
-    TARGET_LR = 0.001
-    TEMPERATURE = 0.2 # Temperature parameter α determines the relative importance of the entropy term against the reward
+    TARGET_LR = 0.005
+    TEMPERATURE = 0.1 # Temperature parameter α determines the relative importance of the entropy term against the reward
     batch = random.sample(buffer, batch_size)
     state_batch, action_batch, reward_batch, next_state_batch = map(np.stack, zip(*batch))
 
@@ -109,7 +124,9 @@ def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_ac
     next_state_batch = torch.FloatTensor(next_state_batch)
     action_batch = torch.FloatTensor(action_batch)
     reward_batch = torch.FloatTensor(reward_batch).unsqueeze(1)
-
+    net_actor.train()
+    net_critic.train()
+    net_value.train()
     with torch.no_grad():
         vf_next_target = target_net_value(next_state_batch)
         next_q_value = reward_batch + DISCOUNT * (vf_next_target)
@@ -161,18 +178,16 @@ def optimize(batch_size, buffer, net_actor, net_critic, net_value, target_net_ac
     scheduler_value.step()
     actor_norm = 0
     critic_norm = 0
-    for target_param, param in zip(target_net_actor.parameters(), net_actor.parameters()):
-        target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
+    for param in net_actor.parameters():
         if param.grad is not None:
             param_norm = param.grad.detach().data.norm(2)
             actor_norm += param_norm.item() ** 2
-    for target_param, param in zip(target_net_critic.parameters(), net_critic.parameters()):
+    for target_param, param in zip(target_net_value.parameters(), net_value.parameters()):
         target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
         if param.grad is not None:
             param_norm = param.grad.detach().data.norm(2)
             critic_norm += param_norm.item() ** 2
-    for target_param, param in zip(target_net_value.parameters(), net_value.parameters()):
-        target_param.data.copy_(target_param.data * (1.0 - TARGET_LR) + param.data * TARGET_LR)
+    for param in net_critic.parameters():
         if param.grad is not None:
             param_norm = param.grad.detach().data.norm(2)
             critic_norm += param_norm.item() ** 2
@@ -187,13 +202,15 @@ def compute_profit(ai, a0, mu, c, p):
 def save_actions(net_actor, net_critic, n_agents, c, fpostfix, out_dir):
     grid_size = 100
     w = np.linspace(c, c + 2, grid_size)
+
     for i in range(n_agents):
+        net_actor[i].eval()
         A = np.zeros([grid_size, grid_size])
         Q = np.zeros([grid_size, grid_size])
         for ai, p1 in enumerate(w):
             for aj, p2 in enumerate(w):
                 state = torch.tensor(np.array([p1, p2]))
-                a, _ = net_actor[i](state)
+                a, _ = net_actor[i](state.unsqueeze(0))
                 #q = net_critic[i](state, a)
                 A[ai, aj] = torch.sigmoid(a).detach().numpy()
                 #Q[ai, aj] = q.detach().numpy()
@@ -212,13 +229,13 @@ def main():
     a0 = 0
     mu = 0.25
     c = 1
-    BATCH_SIZE = 128
+    BATCH_SIZE = 256
     HIDDEN_SIZE = 256
-    BUF_SIZE = 300
+    BUF_SIZE = int(5e3)
     INITIAL_LR_ACTOR = 3e-4
-    INITIAL_LR_CRITIC = 3e-5
-    INITIAL_LR_VALUE = 3e-5
-    MAX_T = int(5e3)
+    INITIAL_LR_CRITIC = 3e-4
+    INITIAL_LR_VALUE = 3e-4
+    MAX_T = int(5e4)
     LR_DECAY_ACTOR = 0.999
     LR_DECAY_CRITIC = 1
     LR_DECAY_VALUE = 1
@@ -242,15 +259,13 @@ def main():
             net_value.append(ValueNetwork(n_agents, HIDDEN_SIZE))
             net_critic.append(QNetwork(n_agents, 1, HIDDEN_SIZE))
             buffer.append(deque(maxlen=BUF_SIZE))
-        target_net_actor = copy.deepcopy(net_actor)
-        target_net_critic = copy.deepcopy(net_critic)
         target_net_value = copy.deepcopy(net_value)
         # Initial state is random, but ensure prices are above marginal cost
         state = torch.sigmoid(torch.randn(n_agents)) + c
         # initial state-action mappings
         save_actions(net_actor, net_critic, n_agents, c, f"initial_{fpostfix}", out_dir)
         # One optimizer per network
-        optimizer_actor = [torch.optim.AdamW(n.parameters(), lr=INITIAL_LR_ACTOR) for n in net_actor]
+        optimizer_actor = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_ACTOR) for n in net_actor]
         optimizer_critic = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_CRITIC) for n in net_critic]
         optimizer_value = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_VALUE) for n in net_value]
         # One scheduler per network
@@ -269,7 +284,8 @@ def main():
         critic_loss = np.zeros([n_agents, MAX_T])
         for t in tqdm(range(MAX_T)):
             for i in range(n_agents):
-                mean, log_std = net_actor[i].forward(state)
+                net_actor[i].eval()
+                mean, log_std = net_actor[i].forward(state.unsqueeze(0))
                 std = log_std.exp()
                 normal = D.Normal(mean, std)
                 p = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -284,7 +300,7 @@ def main():
             state = torch.tensor(price)
             if t >= BATCH_SIZE:
                 for i in range(n_agents):
-                    al, cl, an, cn = optimize(BATCH_SIZE, buffer[i], net_actor[i], net_critic[i], net_value[i], target_net_actor[i], target_net_critic[i], target_net_value[i], optimizer_actor[i], optimizer_critic[i], optimizer_value[i], scheduler_actor[i], scheduler_critic[i], scheduler_value[i])
+                    al, cl, an, cn = optimize(BATCH_SIZE, buffer[i], net_actor[i], net_critic[i], net_value[i], target_net_value[i], optimizer_actor[i], optimizer_critic[i], optimizer_value[i], scheduler_actor[i], scheduler_critic[i], scheduler_value[i])
                     net_lr[i, t] = scheduler_actor[i].get_last_lr()[0]
                     actor_norm[i, t] = an
                     critic_norm[i, t] = cn
@@ -301,7 +317,8 @@ def main():
         ir_prices = np.zeros([n_agents, ir_periods])
         for t in range(ir_periods):
             for i in range(n_agents):
-                p, _ = net_actor[i](state)
+                net_actor[i].eval()
+                p, _ = net_actor[i].forward(state.unsqueeze(0))
                 p = torch.sigmoid(p)
                 price[i] = (p + c).detach().numpy()
                 ir_prices[i, t] = price[i]
