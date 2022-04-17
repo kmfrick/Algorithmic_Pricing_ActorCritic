@@ -38,20 +38,20 @@ def plot_array_rolling_avg(
 
 
 def plot_heatmap(arr, title, fnames):
+    fig, ax = plt.subplots(1, 2)
     for i, a in enumerate(arr):
-        ax = plt.subplot()
-        im = ax.imshow(
+        im = ax[i].imshow(
             a.reshape([100, 100]),
             cmap="Reds",
             extent=(1, 3, 1, 3),
             aspect="auto",
             origin="lower",
         )
-        ax.set_xlabel("p0")
-        ax.set_ylabel("p1")
-        plt.colorbar(im)
-        ax.set_title(f"Session {i} {title}: {fnames[i]}")
-        plt.show()
+        ax[i].set_xlabel("p0")
+        ax[i].set_ylabel("p1")
+        ax[i].set_title(f"Session {i} {title}: {fnames[i]}")
+    fig.colorbar(im)
+    plt.show()
 
 
 def load_and_plot(files, out_dir, fname, low, high, rolling_int, title, points=False):
@@ -80,11 +80,7 @@ def main():
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
     out_dir = sys.argv[1]
     files = os.listdir(out_dir)
-    load_and_plot(files, out_dir, "actor_loss", 0, 0, 100, "Actor Loss")
-    #load_and_plot(files, out_dir, "actor_norm", 0, 1, 10, "Actor Grad Norm")
-    load_and_plot(files, out_dir, "critic_loss", 0, 0, 100, "Critic Loss")
-    #load_and_plot(files, out_dir, "critic_norm", 0, 1, 10, "Critic Grad Norm")
-    load_and_plot(files, out_dir, "session", nash, coop, 100, "Rewards")
+    load_and_plot(files, out_dir, "session", nash, coop, 1024, "Rewards")
     load_and_plot(files, out_dir, "ir_profits", nash, coop, 1, "IR Profits", True)
     load_and_plot(
         files, out_dir, "ir_prices", nash_price, coop_price, 1, "IR Prices", True
