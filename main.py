@@ -4,7 +4,7 @@ import random
 import sys
 
 from collections import deque
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import numpy as np
 
@@ -37,7 +37,6 @@ class ValueNetwork(nn.Module):
         self.apply(weights_init_)
 
     def forward(self, state):
-        #state = state.float()
         x = F.leaky_relu(self.linear1(state))
         x = self.bn1(x)
         x = F.leaky_relu(self.linear2(x))
@@ -72,7 +71,7 @@ class QNetwork(nn.Module):
         x1 = F.leaky_relu(self.linear1(xu))
         x1 = self.bn1(x1)
         x1 = F.leaky_relu(self.linear2(x1))
-        x2 = self.bn2(x1)
+        x1 = self.bn2(x1)
         x1 = self.linear3(x1)
 
         x2 = F.leaky_relu(self.linear4(xu))
@@ -98,7 +97,6 @@ class GaussianPolicy(nn.Module):
         self.apply(weights_init_)
 
     def forward(self, state):
-        #state = state.float()
         LOG_SIG_MAX = 1
         LOG_SIG_MIN = -20
         x = F.leaky_relu(self.linear1(state))
@@ -120,16 +118,33 @@ class GaussianPolicy(nn.Module):
         log_prob = log_prob.sum(1, keepdim=True)
         return action, log_prob, mean, log_std
 
+
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
 
-def optimize(device, batch_size, buffer, policy, critic, value, value_target, policy_optim, critic_optim, value_optim, scheduler_actor, scheduler_critic, scheduler_value):
-    DISCOUNT = 0.95
+
+def optimize(
+        batch_size,
+        buffer,
+        policy,
+        critic,
+        value,
+        value_target,
+        policy_optim,
+        critic_optim,
+        value_optim,
+        scheduler_actor,
+        scheduler_critic,
+        scheduler_value,
+):
+    DISCOUNT = 0.99
     TARGET_LR = 0.005
-    TEMPERATURE = 0.1 # Temperature parameter α determines the relative importance of the entropy term against the reward
+    TEMPERATURE = 0.1  # Temperature parameter determines the relative importance of the entropy term against the reward
     batch = random.sample(buffer, min(len(buffer), batch_size))
-    state_batch_, action_batch_, reward_batch_, next_state_batch = map(torch.stack, zip(*batch))
+    state_batch_, action_batch_, reward_batch_, next_state_batch = map(
+        torch.stack, zip(*batch)
+    )
     reward_batch = reward_batch_.unsqueeze(1)
     state_batch = state_batch_.squeeze()
     action_batch = action_batch_.unsqueeze(1)
@@ -139,13 +154,17 @@ def optimize(device, batch_size, buffer, policy, critic, value, value_target, po
     with torch.no_grad():
         vf_next_target = value_target(next_state_batch)
         next_q_value = reward_batch + DISCOUNT * (vf_next_target)
-
-    qf1, qf2 = critic(state_batch, action_batch)  # Two Q-functions to mitigate positive bias in the policy improvement step
-    qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-    qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+    qf1, qf2 = critic(
+        state_batch, action_batch
+    )  # Two Q-functions to mitigate positive bias in the policy improvement step
+    qf1_loss = F.mse_loss(
+        qf1, next_q_value
+    )  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+    qf2_loss = F.mse_loss(
+        qf2, next_q_value
+    )  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
     qf_loss = qf1_loss + qf2_loss
-
-    critic_optim.zero_grad()
+    critic_optim.zero_grad(set_to_none=True)
     qf_loss.backward()
     critic_optim.step()
 
@@ -154,153 +173,189 @@ def optimize(device, batch_size, buffer, policy, critic, value, value_target, po
     qf1_pi, qf2_pi = critic(state_batch, pi)
     min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
-    policy_loss = ((TEMPERATURE * log_pi) - min_qf_pi).mean()  # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+    policy_loss = (
+            (TEMPERATURE * log_pi) - min_qf_pi
+    ).mean()  # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
     # Regularization Loss
     reg_loss = 0.001 * (mean.pow(2).mean() + log_std.pow(2).mean())
     policy_loss += reg_loss
 
-    policy_optim.zero_grad()
+    policy_optim.zero_grad(set_to_none=True)
     policy_loss.backward()
     policy_optim.step()
-
     vf = value(state_batch)
 
     with torch.no_grad():
         vf_target = min_qf_pi - (TEMPERATURE * log_pi)
 
-    vf_loss = F.mse_loss(vf, vf_target)  # JV = 𝔼(st)~D[0.5(V(st) - (𝔼at~π[Q(st,at) - α * logπ(at|st)]))^2]
+    vf_loss = F.mse_loss(
+        vf, vf_target
+    )  # JV = 𝔼(st)~D[0.5(V(st) - (𝔼at~π[Q(st,at) - α * logπ(at|st)]))^2]
 
-    value_optim.zero_grad()
+    value_optim.zero_grad(set_to_none=True)
     vf_loss.backward()
     value_optim.step()
-
     soft_update(value_target, value, TARGET_LR)
-    actor_norm = 0
-    #for p in policy.parameters():
-    #    if p.grad is not None:
-    #        param_norm = p.grad.detach().data.norm(2)
-    #        actor_norm += param_norm.item() ** 2
-    critic_norm = 0
-    #for p in critic.parameters():
-    #    if p.grad is not None:
-    #        param_norm = p.grad.detach().data.norm(2)
-    #        critic_norm += param_norm.item() ** 2
+    return policy_loss.item(), qf_loss.item(), vf_loss.item(), reg_loss.item()
 
-    return policy_loss, qf_loss, actor_norm, critic_norm
 
 def compute_profit(ai, a0, mu, c, p):
-    q = torch.exp((ai - p) / mu) / (torch.sum(torch.exp((ai - p) / mu)) + torch.exp(a0 / mu))
+    q = torch.exp((ai - p) / mu) / (
+            torch.sum(torch.exp((ai - p) / mu)) + torch.exp(a0 / mu)
+    )
     pi = (p - c) * q
     return pi
 
-def save_actions(net_actor, net_critic, n_agents, c, fpostfix, out_dir):
+
+def save_state_action_map(net_actor, net_critic, n_agents, c, fpostfix, out_dir):
     grid_size = 100
-    w = np.linspace(c, c + 2, grid_size)
+    w = torch.linspace(c, c + 2, grid_size, requires_grad=False)
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-    for i in range(n_agents):
-        net_actor[i].eval()
-        A = np.zeros([grid_size, grid_size])
-        Q = np.zeros([grid_size, grid_size])
-        for ai, p1 in enumerate(w):
-            for aj, p2 in enumerate(w):
-                state = torch.tensor([[p1, p2]]).to(device)
-                a = select_action(device, net_actor[i], state, c, eval=True)
-                #q = net_critic[i](state, a)
-                A[ai, aj] = a.cpu().detach().numpy()
-                #Q[ai, aj] = q.detach().numpy()
-        np.save(f"{out_dir}/actions_{fpostfix}_{i}.npy", A)
-        #np.save(f"{out_dir}/values_{fpostfix}_{i}.npy", Q)
+    with torch.no_grad():
+        for i in range(n_agents):
+            net_actor[i].eval()
+            A = torch.zeros([grid_size, grid_size], requires_grad=False)
+            Q = torch.zeros([grid_size, grid_size], requires_grad=False)
+            for ai, p1 in enumerate(w):
+                for aj, p2 in enumerate(w):
+                    state = torch.tensor([[p1, p2]]).to(device)
+                    a = select_action(device, net_actor[i], state, c, eval=True)
+                    # q = net_critic[i](state, a)
+                    A[ai, aj] = a
+                    # Q[ai, aj] = q.detach().numpy()
+            np.save(f"{out_dir}/actions_{fpostfix}_{i}.npy", A.cpu().detach().numpy())
+            # np.save(f"{out_dir}/values_{fpostfix}_{i}.npy", Q)
+
 
 def select_action(device, net, state, c, eval=False):
     state = state.unsqueeze(0)
     with torch.no_grad():
-      if eval == False:
-          action, _, _, _ = net.sample(state)
-      else:
-          _, _, action, _ = net.sample(state)
-          action = torch.tanh(action)
-    return rescale_action(action, action_range = [c, c + 1])
+        if not eval:
+            action, _, _, _ = net.sample(state)
+        else:
+            _, _, action, _ = net.sample(state)
+            action = torch.tanh(action)
+    return rescale_action(action, action_range=[c, c + 1])
+
 
 def rescale_action(action, action_range):
-    return action * (action_range[1] - action_range[0]) / 2.0 + \
-           (action_range[1] + action_range[0]) / 2.0
+    return (
+            action * (action_range[1] - action_range[0]) / 2.0
+            + (action_range[1] + action_range[0]) / 2.0
+    )
 
 
 def main():
-    if len(sys.argv) < 2:
-        out_dir = "exp_colab"
-    else:
-        out_dir = sys.argv[1]
+    out_dir = "exp_kaggle_long"
     os.makedirs(out_dir, exist_ok=True)
-    #device = xm.xla_device()
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-    os.makedirs(out_dir, exist_ok=True)
     n_agents = 2
-    ai = torch.tensor([2.0, 2.0]).to(device)
+    ai = torch.tensor([2.0] * n_agents).to(device)
     a0 = torch.tensor([0]).to(device)
     mu = torch.tensor([0.25]).to(device)
     c = 1
     BATCH_SIZE = 1024
+    IR_PERIODS = 20
     HIDDEN_SIZE = 512
-    BUF_SIZE = int(1e4)
     INITIAL_LR_ACTOR = 3e-4
-    INITIAL_LR_CRITIC = 3e-4
+    INITIAL_LR_CRITIC = 3e-5
     INITIAL_LR_VALUE = 3e-4
-    MAX_T = int(1e5)
+    MAX_T = int(6e4)
+    BUF_SIZE = MAX_T // 10
+    CKPT_T = MAX_T // 10
     LR_DECAY_ACTOR = 1
     LR_DECAY_CRITIC = 1
     LR_DECAY_VALUE = 1
-    nash_price = 1.47293
-    coop_price = 1.9249689958811602
-    param_str = f"BS_{BATCH_SIZE}_HS_{HIDDEN_SIZE}_BUFS_{BUF_SIZE}_LRA_{INITIAL_LR_ACTOR}_LRC_{INITIAL_LR_CRITIC}_LRV_{INITIAL_LR_VALUE}"
-    seeds = [12345, 54321, 50321, 9827391, 8534101]#, 4305430, 12654329, 3483055, 348203, 2356, 250917, 200822, 151515, 50505, 301524]
+    NASH_PRICE = 1.47293
+    COOP_PRICE = 1.92497
+    PARAM_STR = f"BS_{BATCH_SIZE}_HS_{HIDDEN_SIZE}_BUFS_{BUF_SIZE}_LRA_{INITIAL_LR_ACTOR}_LRC_{INITIAL_LR_CRITIC}_LRV_{INITIAL_LR_VALUE}"
+    SEEDS = [
+        12345,
+        54321,
+        50321,
+        9827391,
+        8534101,
+        4305430,
+        12654329,
+        3483055,
+        348203,
+        2356,
+        250917,
+        200822,
+        151515,
+        50505,
+        301524,
+    ]
 
-    ir_periods = 20
-    #torch.autograd.set_detect_anomaly(True)
-    for session in range(len(seeds)):
-        fpostfix = seeds[session]
+    # torch.autograd.set_detect_anomaly(True)
+    for session in range(len(SEEDS)):
+        fpostfix = SEEDS[session]
         # Random seeds
-        np.random.seed(seeds[session])
-        torch.manual_seed(seeds[session])
+        np.random.seed(SEEDS[session])
+        torch.manual_seed(SEEDS[session])
         # Initialize replay buffers and NNs
-        buffer = []
-        net_actor = [GaussianPolicy(n_agents, 1,  HIDDEN_SIZE).to(device) for i in n_agents]
-        net_critic = [ValueNetwork(n_agents, HIDDEN_SIZE).to(device) for i in n_agents]
-        net_value = [QNetwork(n_agents, 1, HIDDEN_SIZE).to(device) for i in n_agents]
-        for i in range(n_agents):
-            buffer.append(deque(maxlen=BUF_SIZE))
+        buffer = [deque(maxlen=BUF_SIZE) for i in range(n_agents)]
+        net_actor = [
+            GaussianPolicy(n_agents, 1, HIDDEN_SIZE).to(device) for i in range(n_agents)
+        ]
+        net_critic = [
+            QNetwork(n_agents, 1, HIDDEN_SIZE).to(device) for i in range(n_agents)
+        ]
+        net_value = [
+            ValueNetwork(n_agents, HIDDEN_SIZE).to(device) for i in range(n_agents)
+        ]
         target_net_value = copy.deepcopy(net_value)
         for i in range(n_agents):
-          target_net_value[i] = target_net_value[i].to(device)
+            target_net_value[i] = target_net_value[i].to(device)
+            for p in target_net_value[i].parameters():
+                p.requires_grad = False
+            buffer.append(deque(maxlen=BUF_SIZE))
         # Initial state is random, but ensure prices are above marginal cost
         state = torch.sigmoid(torch.randn(n_agents)).to(device) + c
         state = state.unsqueeze(0)
-        # initial state-action mappings
-        #save_actions(net_actor, net_critic, n_agents, c, f"initial_{fpostfix}", out_dir)
+        # Save initial state-action mappings
+        # save_actions(net_actor, net_critic, n_agents, c, f"initial_{fpostfix}", out_dir)
         # One optimizer per network
-        optimizer_actor = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_ACTOR) for n in net_actor]
-        optimizer_critic = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_CRITIC) for n in net_critic]
-        optimizer_value = [torch.optim.Adam(n.parameters(), lr=INITIAL_LR_VALUE) for n in net_value]
+        optimizer_actor = [
+            torch.optim.Adam(n.parameters(), lr=INITIAL_LR_ACTOR) for n in net_actor
+        ]
+        optimizer_critic = [
+            torch.optim.Adam(n.parameters(), lr=INITIAL_LR_CRITIC) for n in net_critic
+        ]
+        optimizer_value = [
+            torch.optim.Adam(n.parameters(), lr=INITIAL_LR_VALUE) for n in net_value
+        ]
         # One scheduler per network
-        scheduler_actor = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_ACTOR) for o in optimizer_actor]
-        scheduler_critic = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_CRITIC) for o in optimizer_critic]
-        scheduler_value = [torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_VALUE) for o in optimizer_value]
+        scheduler_actor = [
+            torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_ACTOR)
+            for o in optimizer_actor
+        ]
+        scheduler_critic = [
+            torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_CRITIC)
+            for o in optimizer_critic
+        ]
+        scheduler_value = [
+            torch.optim.lr_scheduler.ExponentialLR(o, gamma=LR_DECAY_VALUE)
+            for o in optimizer_value
+        ]
 
         price = torch.zeros([n_agents]).to(device)
         total_reward = torch.zeros([n_agents, MAX_T])
         price_history = torch.zeros([n_agents, MAX_T])
-        actor_norm = torch.zeros([n_agents, MAX_T])
-        critic_norm = torch.zeros([n_agents, MAX_T])
         net_lr = torch.zeros([n_agents, MAX_T])
         net_lr[:BATCH_SIZE, 0] = INITIAL_LR_ACTOR
         actor_loss = torch.zeros([n_agents, MAX_T])
         critic_loss = torch.zeros([n_agents, MAX_T])
+        value_loss = torch.zeros([n_agents, MAX_T])
+        regularization_loss = torch.zeros([n_agents, MAX_T])
         with tqdm(range(MAX_T)) as t_tq:
             for t in t_tq:
-                with record_function("model_inference"):
+                with torch.no_grad():
                     for i in range(n_agents):
                         net_actor[i].eval()
-                        price[i] = select_action(device, net_actor[i], state, c).squeeze()
+                        price[i] = select_action(
+                            device, net_actor[i], state, c
+                        ).squeeze()
                         price_history[i, t] = price[i]
                     profits = compute_profit(ai, a0, mu, c, price)
                     for i in range(n_agents):
@@ -308,38 +363,78 @@ def main():
                         buffer[i].append(transition)
                         total_reward[i, t] = profits[i]
                     state = price.unsqueeze(0)
-                    if t > 0:
-                        for i in range(n_agents):
-                            al, cl, an, cn = optimize(device, BATCH_SIZE, buffer[i], net_actor[i], net_critic[i], net_value[i], target_net_value[i], optimizer_actor[i], optimizer_critic[i], optimizer_value[i], scheduler_actor[i], scheduler_critic[i], scheduler_value[i])
-                            net_lr[i, t] = scheduler_actor[i].get_last_lr()[0]
-                            actor_norm[i, t] = an
-                            critic_norm[i, t] = cn
-                            actor_loss[i, t] = al
-                            critic_loss[i, t] = cl
-                        t_tq.set_postfix_str(torch.mean(total_reward[:, :t]).cpu().detach().numpy())
+                    if t > 0 and t % CKPT_T == 0:
+                        checkpoint(fpostfix, n_agents, net_actor, net_critic, net_value, out_dir, t)
+                        impulse_response(IR_PERIODS, a0, ai, c, device, fpostfix, mu, n_agents, NASH_PRICE, net_actor,
+                                         out_dir, price, state, t)
+                        save_state_action_map(net_actor, net_critic, n_agents, c, f"final_{fpostfix}", out_dir)
+                if t >= BATCH_SIZE:
+                    for i in range(n_agents):
+                        al, cl, vl, rl = optimize(
+                            BATCH_SIZE,
+                            buffer[i],
+                            net_actor[i],
+                            net_critic[i],
+                            net_value[i],
+                            target_net_value[i],
+                            optimizer_actor[i],
+                            optimizer_critic[i],
+                            optimizer_value[i],
+                            scheduler_actor[i],
+                            scheduler_critic[i],
+                            scheduler_value[i],
+                        )
+                        net_lr[i, t] = scheduler_actor[i].get_last_lr()[0]
+                        actor_loss[i, t] = al
+                        critic_loss[i, t] = cl
+                        value_loss[i, t] = vl
+                        regularization_loss[i, t] = rl
+                    with torch.no_grad():
+                        start_t = max(0, t - BATCH_SIZE)
+                        avg_prof = torch.mean(total_reward[:, start_t:t])
+                        act_loss = torch.mean(actor_loss[:, start_t:t])
+                        cri_loss = torch.mean(critic_loss[:, start_t:t])
+                        val_loss = torch.mean(value_loss[:, start_t:t])
+                        reg_loss = torch.mean(regularization_loss[:, start_t:t])
+                    t_tq.set_postfix_str(
+                        f"P =  {avg_prof:.3f}, AL = {act_loss:.3f}, CL = {cri_loss:.3f}, VL = {val_loss:.3f}, RL = {reg_loss:.3f}")
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward.detach())
         np.save(f"{out_dir}/net_lr_{fpostfix}.npy", net_lr.detach())
-        np.save(f"{out_dir}/critic_norm_{fpostfix}.npy", critic_norm.detach())
         np.save(f"{out_dir}/critic_loss_{fpostfix}.npy", critic_loss.detach())
-        np.save(f"{out_dir}/actor_norm_{fpostfix}.npy", actor_norm.detach())
         np.save(f"{out_dir}/actor_loss_{fpostfix}.npy", actor_loss.detach())
-        # Impulse response
-        ir_profits = torch.zeros([n_agents, ir_periods])
-        ir_prices = torch.zeros([n_agents, ir_periods])
-        for t in range(ir_periods):
+        np.save(f"{out_dir}/value_loss_{fpostfix}.npy", value_loss.detach())
+        checkpoint(fpostfix, n_agents, net_actor, net_critic, net_value, out_dir, t)
+        impulse_response(IR_PERIODS, a0, ai, c, device, fpostfix, mu, n_agents, NASH_PRICE, net_actor, out_dir, price,
+                         state, MAX_T)
+        save_state_action_map(net_actor, net_critic, n_agents, c, f"final_{fpostfix}", out_dir)
+
+
+def checkpoint(fpostfix, n_agents, net_actor, net_critic, net_value, out_dir, t):
+    for i in range(n_agents):
+        torch.save(net_actor[i].state_dict(), f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
+        torch.save(net_critic[i].state_dict(), f"{out_dir}/critic_weights_{fpostfix}_t{t}_agent{i}.pth")
+        torch.save(net_value[i].state_dict(), f"{out_dir}/value_weights_{fpostfix}_t{t}_agent{i}.pth")
+
+
+def impulse_response(IR_PERIODS, a0, ai, c, device, fpostfix, mu, n_agents, nash_price, net_actor, out_dir, price,
+                     state, t):
+    with torch.no_grad():
+        ir_profits = torch.zeros([n_agents, IR_PERIODS])
+        ir_prices = torch.zeros([n_agents, IR_PERIODS])
+        for t in range(IR_PERIODS):
             for i in range(n_agents):
                 net_actor[i].eval()
-                price[i] = select_action(device, net_actor[i], state, c, eval=True).squeeze()
+                price[i] = select_action(
+                    device, net_actor[i], state, c, eval=True
+                ).squeeze()
                 ir_prices[i, t] = price[i]
-            if (ir_periods / 2) <= t <= (ir_periods / 2 + 3):
+            if (IR_PERIODS / 2) <= t <= (IR_PERIODS / 2 + 3):
                 price[0] = nash_price
                 ir_prices[0, t] = price[0]
             ir_profits[:, t] = compute_profit(ai, a0, mu, c, price)
             state = price
-        np.save(f"{out_dir}/ir_profits_{fpostfix}.npy", ir_profits.detach())
-        np.save(f"{out_dir}/ir_prices_{fpostfix}.npy", ir_prices.detach())
-        # final state-action mappings
-        save_actions(net_actor, net_critic, n_agents, c, f"final_{fpostfix}", out_dir)
+        np.save(f"{out_dir}/ir_profits_{fpostfix}_t{t}.npy", ir_profits.detach())
+        np.save(f"{out_dir}/ir_prices_{fpostfix}_t{t}.npy", ir_prices.detach())
 
 
 if __name__ == "__main__":
