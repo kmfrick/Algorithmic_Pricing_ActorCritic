@@ -181,31 +181,10 @@ def save_state_action_map(actor, n_agents, c, fpostfix, out_dir):
 
 def compute_profit(ai, a0, mu, c, p):
     q = torch.exp((ai - p) / mu) / (
-        torch.sum(torch.exp((ai - p) / mu)) + torch.exp(a0 / mu)
+        torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu)
     )
     pi = (p - c) * q
     return pi
-
-
-def impulse_response(
-    ir_periods, a0, ai, c, fpostfix, mu, n_agents, nash_price, actor, out_dir, state, t
-):
-    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-    price = torch.zeros([n_agents]).to(device)
-    with torch.no_grad():
-        ir_profits = torch.zeros([n_agents, ir_periods])
-        ir_prices = torch.zeros([n_agents, ir_periods])
-        for t in range(ir_periods):
-            for i in range(n_agents):
-                price[i] = scale_price(actor[i].act(state, deterministic=True), c)
-                ir_prices[i, t] = price[i]
-            if (ir_periods / 2) <= t <= (ir_periods / 2 + 3):
-                price[0] = nash_price
-                ir_prices[0, t] = price[0]
-            ir_profits[:, t] = compute_profit(ai, a0, mu, c, price)
-            state = price
-        np.save(f"{out_dir}/ir_profits_{fpostfix}_t{t}.npy", ir_profits.detach())
-        np.save(f"{out_dir}/ir_prices_{fpostfix}_t{t}.npy", ir_prices.detach())
 
 
 def compute_loss_q(ac, ac_targ, data):
@@ -285,46 +264,22 @@ def get_action(ac, o, deterministic=False):
     return ac.act(torch.as_tensor(o, dtype=torch.float32), deterministic)
 
 
-def checkpoint(
-    ir_periods,
-    nash_price,
-    a0,
-    ai,
-    c,
-    mu,
-    ac,
-    ac_targ,
-    out_dir,
-    fpostfix,
-    n_agents,
-    state,
-    t,
-):
-    for i in range(n_agents):
-        ac[i].checkpoint(fpostfix, out_dir, t, i)
-        ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
-    impulse_response(
-        ir_periods, a0, ai, c, fpostfix, mu, n_agents, nash_price, ac, out_dir, state, t
-    )
-    save_state_action_map(ac, n_agents, c, f"final_{fpostfix}", out_dir)
-
-
 def scale_price(price, c):
     return price + c
 
 NASH_PRICE = 1.47293
 
 def main():
-    out_dir = "exp_kaggle_new"
+    out_dir = "exp_kaggle_five_seeds_bigger_batch"
     os.makedirs(out_dir, exist_ok=True)
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
     n_agents = 2
-    ai = torch.tensor([2.0] * n_agents).to(device)
-    a0 = torch.tensor([0]).to(device)
-    mu = torch.tensor([0.25]).to(device)
+    ai = 2
+    a0 = 0
+    mu = 0.25
     c = 1
-    BATCH_SIZE = 128
-    IR_PERIODS = 20
+    BATCH_SIZE = 256
+    IR_PERIODS = 50
     HIDDEN_SIZE = 256
     INITIAL_LR_ACTOR = 3e-3
     INITIAL_LR_CRITIC = 3e-3
@@ -336,7 +291,7 @@ def main():
 
     NASH_PRICE = 1.47293
     COOP_PRICE = 1.92497
-    SEEDS = [54321]
+    SEEDS = [12345, 54321, 464738, 250917]
 
     # torch.autograd.set_detect_anomaly(True)
     for session in range(len(SEEDS)):
@@ -389,21 +344,9 @@ def main():
                         total_reward[i, t] = profits[i]
                     state = price.unsqueeze(0)
                     if t > 0 and t % CKPT_T == 0:
-                        checkpoint(
-                            IR_PERIODS,
-                            NASH_PRICE,
-                            a0,
-                            ai,
-                            c,
-                            mu,
-                            ac,
-                            ac_targ,
-                            out_dir,
-                            fpostfix,
-                            n_agents,
-                            state.clone(),
-                            t,
-                        )
+                        for i in range(n_agents):
+                            ac[i].checkpoint(fpostfix, out_dir, t, i)
+                            ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
                 if t >= BATCH_SIZE:
                     for i in range(n_agents):
                         batch = replay_buffer[i].sample_batch(BATCH_SIZE)
@@ -434,21 +377,26 @@ def main():
                         f"p = {avg_price}, P = {avg_prof}, QL = {q_loss}, PL = {pi_loss}"
                     )
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward.detach())
-        checkpoint(
-            IR_PERIODS,
-            NASH_PRICE,
-            a0,
-            ai,
-            c,
-            mu,
-            ac,
-            ac_targ,
-            out_dir,
-            fpostfix,
-            n_agents,
-            state.clone(),
-            t,
-        )
+        for i in range(n_agents):
+            ac[i].checkpoint(fpostfix, out_dir, t, i)
+            ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
+        save_state_action_map(ac, n_agents, c, f"final_{fpostfix}", out_dir)
+        # Impulse response
+        with torch.no_grad():
+            ir_profits = torch.zeros([n_agents, IR_PERIODS])
+            ir_prices = torch.zeros([n_agents, IR_PERIODS])
+            for t in range(IR_PERIODS):
+                for i in range(n_agents):
+                    price[i] = scale_price(ac[i].act(state, deterministic=True), c)
+                    ir_prices[i, t] = price[i]
+                if (IR_PERIODS / 2) <= t <= (IR_PERIODS / 2 + 3):
+                    price[0] = NASH_PRICE
+                    ir_prices[0, t] = price[0]
+                ir_profits[:, t] = compute_profit(ai, a0, mu, c, price)
+                state = price
+            np.save(f"{out_dir}/ir_profits_{fpostfix}_t{t}.npy", ir_profits.detach())
+            np.save(f"{out_dir}/ir_prices_{fpostfix}_t{t}.npy", ir_prices.detach())
+        print("Impulse responses computed.")
 
 
 if __name__ == "__main__":
