@@ -35,10 +35,10 @@ def plot_array_rolling_avg(arr, low_line, high_line, title, rolling_interval, fn
         plt.show()
 
 
-def plot_heatmap(arr, title, fnames):
+def plot_heatmap(arr, title, fnames, c = 1, w = 100):
     for i, a in enumerate(arr):
         ax = plt.subplot()
-        im = ax.imshow(a.reshape([100, 100]), cmap="Reds", extent=(1, 3, 1, 3), aspect="auto", origin="lower")
+        im = ax.imshow(a.reshape([w, w]), cmap="Reds", extent=(c, c + 1, c, c + 1), aspect="auto", origin="lower")
         ax.set_xlabel("p0")
         ax.set_ylabel("p1")
         plt.colorbar(im)
