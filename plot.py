@@ -102,13 +102,13 @@ def main():
         # Create and plot state-action map
         grid_size = 100
         w = torch.linspace(c, 2 * c, grid_size, requires_grad=False)
-        A = [torch.zeros([grid_size, grid_size], requires_grad=False) for i in range(n_agents)]
-        for i in range(n_agents):
-            for ai, p1 in enumerate(w):
-                for aj, p2 in enumerate(w):
+        A = [torch.zeros([grid_size, grid_size], requires_grad=False) for i in range(N_AGENTS)]
+        for i in range(N_AGENTS):
+            for a_i, p1 in enumerate(w):
+                for a_j, p2 in enumerate(w):
                     state = torch.tensor([[p1, p2]])
                     a = scale_price(actor[i].act(state, deterministic=True), c)
-                    A[i][ai, aj] = a
+                    A[i][a_i, a_j] = a
         plot_heatmap(A, f"Actions for seed {fpostfix}")
         # Impulse response
         price_history = np.zeros([N_AGENTS, ir_periods])
@@ -116,13 +116,30 @@ def main():
         for i in range(0, N_AGENTS):
             state[i] = (coop_price - nash_price) * STARTING_PROFIT_GAIN + nash_price
         price = state.clone()
+        initial_state = state.clone()
+        # First compute non-deviation profits
+        DISCOUNT = 0.99
+        nondev_profit = 0
+        for t in range(ir_periods):
+            for i in range(N_AGENTS):
+                price[i] = scale_price(actor[i].act(state, deterministic=True), c)
+            if t >= (ir_periods / 2):
+                nondev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods/2)
+            price_history[:, t] = price
+            state = price
+        # Now compute deviation profits
+        dev_profit = 0
+        state = initial_state.clone()
         for t in range(ir_periods):
             for i in range(N_AGENTS):
                 price[i] = scale_price(actor[i].act(state, deterministic=True), c)
             if t == (ir_periods / 2):
                 price[0] = torch.tensor(grad_desc(Pi, price.numpy(), 0))
+            if t >= (ir_periods / 2):
+                dev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods/2)
             price_history[:, t] = price
             state = price
+        print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}")
         for i in range(N_AGENTS):
             plt.scatter(list(range(ir_periods)), price_history[i, :])
         plt.legend(["Deviating agent", "Non-deviating agent"])
