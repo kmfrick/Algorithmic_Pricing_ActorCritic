@@ -218,11 +218,11 @@ def main():
     mu = 0.25
     c = 1
     N_AGENTS = 2
-    BATCH_SIZE = 32
+    BATCH_SIZE = 256
     HIDDEN_SIZE = 256
     INITIAL_LR_ACTOR = 3e-3
     INITIAL_LR_CRITIC = 3e-3
-    MAX_T = int(1e2)
+    MAX_T = int(1e5)
     BUF_SIZE = MAX_T // 10
     CKPT_T = MAX_T // 10
     TEMP_DECAY = -1e-4
