@@ -227,6 +227,11 @@ def main():
     CKPT_T = MAX_T // 10
     TEMP_DECAY = -1e-4
     SEEDS = [12345, 54321, 464738, 250917]
+    ER_DECAY1 = 2e-5
+    ER_DECAY2 = 2e-4
+    T_ER_THRESH = 6e4
+    x = np.arange(MAX_T)
+    EXP_RATE = np.piecewise(x, [x < T_ER_THRESH], [lambda t : np.exp(-t * ER_DECAY1), lambda t : np.exp(-(t-T_ER_THRESH) * ER_DECAY2) / np.exp(T_ER_THRESH * ER_DECAY1)])
 
     print(f"Will checkpoint every {CKPT_T} episodes")
     # torch.autograd.set_detect_anomaly(True)
@@ -263,10 +268,14 @@ def main():
             with torch.no_grad():
                 for i in range(N_AGENTS):
                     # Randomly explore at the beginning
-                    if t < BATCH_SIZE * 10:
+                    if t < BATCH_SIZE:
                         action[i] = torch.rand(1)
                     else:
-                        action[i] = ac[i].act(state).squeeze()
+                        # Choose the deterministic policy more often
+                        if np.random.rand() < EXP_RATE[t]:
+                            action[i] = ac[i].act(state, deterministic=False).squeeze()
+                        else:
+                            action[i] = ac[i].act(state, deterministic=True).squeeze()
                     price[i] = scale_price(action[i], c)
                 profit = compute_profit(ai, a0, mu, c, price)
                 for i in range(N_AGENTS):
