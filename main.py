@@ -273,7 +273,7 @@ def main():
             replay_buffer.append(ReplayBuffer(obs_dim=N_AGENTS, act_dim=1, size=BUF_SIZE))
             pi_optimizer.append(torch.optim.Adam(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
             q_optimizer.append(torch.optim.Adam(q_params[i], lr=INITIAL_LR_CRITIC))
-            log_temperature.append(torch.zeros(1, requires_grad=True))
+            log_temperature.append(torch.zeros(1, requires_grad=True, device=device))
             temperature_optimizer.append(torch.optim.Adam([log_temperature[i]], lr=INITIAL_LR_TEMP))
         action = torch.zeros([N_AGENTS]).to(device)
         price = torch.zeros([N_AGENTS]).to(device)
