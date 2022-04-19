@@ -70,7 +70,7 @@ def main():
     HIDDEN_SIZE = 256
     MAX_T = int(1e5)
     STARTING_PROFIT_GAIN = 0.9
-    SEEDS = [250917]
+    SEEDS = [12345, 54321, 464738, 250917]
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
     root_dir = sys.argv[1]
 

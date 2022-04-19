@@ -147,39 +147,28 @@ def compute_profit(ai, a0, mu, c, p):
     return pi
 
 
-def update(ac, ac_targ, q_optimizer, pi_optimizer, q_params, data, temp):
+def update(ac, ac_targ, q_optimizer, pi_optimizer, temperature_optimizer, target_entropy, log_temperature, q_params, data):
     TARG_UPDATE_RATE = 0.999
     # First run one gradient descent step for Q1 and Q2
     q_optimizer.zero_grad(set_to_none=True)
     DISCOUNT = 0.99
-    TEMP = 0.1
     o, a, r, o2 = data["obs"], data["act"], data["rew"], data["obs2"]
-    q1 = ac.q1(o, a)
-    q2 = ac.q2(o, a)
-    # Bellman backup for Q functions
-    with torch.no_grad():
-        # Target actions come from *current* policy
-        a2, logp_a2 = ac.pi(o2)
-        # Target Q-values
-        q1_pi_targ = ac_targ.q1(o2, a2)
-        q2_pi_targ = ac_targ.q2(o2, a2)
-        q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-        backup = r + DISCOUNT * (q_pi_targ - TEMP * logp_a2)
-    # MSE loss against Bellman backup
-    loss_q1 = F.smooth_l1_loss(q1, backup)
-    loss_q2 = F.smooth_l1_loss(q2, backup)
-    loss_q = loss_q1 + loss_q2
-    loss_q.backward()
-    q_optimizer.step()
 
     # Freeze Q-networks so you don't waste computational effort
-    # computing gradients for them during the policy learning step.
+    # computing gradients for them during the policy and temperature learning step.
     for p in q_params:
         p.requires_grad = False
 
     # Next run one gradient descent step for pi.
     pi_optimizer.zero_grad(set_to_none=True)
     pi, logp_pi = ac.pi(o)
+
+    loss_temp = -(log_temperature * (logp_pi + target_entropy).detach()).mean()
+    temperature_optimizer.zero_grad()
+    loss_temp.backward()
+    temperature_optimizer.step()
+    temp = log_temperature.exp()
+
     q1_pi = ac.q1(o, pi)
     q2_pi = ac.q2(o, pi)
     q_pi = torch.min(q1_pi, q2_pi)
@@ -192,6 +181,25 @@ def update(ac, ac_targ, q_optimizer, pi_optimizer, q_params, data, temp):
     for p in q_params:
         p.requires_grad = True
 
+    q1 = ac.q1(o, a)
+    q2 = ac.q2(o, a)
+    # Bellman backup for Q functions
+    with torch.no_grad():
+        # Target actions come from *current* policy
+        a2, logp_a2 = ac.pi(o2)
+        # Target Q-values
+        q1_pi_targ = ac_targ.q1(o2, a2)
+        q2_pi_targ = ac_targ.q2(o2, a2)
+        q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+        backup = r + DISCOUNT * (q_pi_targ - temp * logp_a2)
+    # MSE loss against Bellman backup
+    loss_q1 = F.smooth_l1_loss(q1, backup)
+    loss_q2 = F.smooth_l1_loss(q2, backup)
+    loss_q = loss_q1 + loss_q2
+    loss_q.backward()
+    q_optimizer.step()
+
+
     # Finally, update target networks by polyak averaging.
     with torch.no_grad():
         for p, p_targ in zip(ac.parameters(), ac_targ.parameters()):
@@ -200,7 +208,7 @@ def update(ac, ac_targ, q_optimizer, pi_optimizer, q_params, data, temp):
             p_targ.data.mul_(TARG_UPDATE_RATE)
             p_targ.data.add_((1 - TARG_UPDATE_RATE) * p.data)
 
-    return loss_q.item(), loss_pi.item()
+    return loss_q.item(), loss_pi.item(), loss_temp.item()
 
 
 def get_action(ac, o, deterministic=False):
@@ -222,16 +230,16 @@ def main():
     HIDDEN_SIZE = 256
     INITIAL_LR_ACTOR = 3e-3
     INITIAL_LR_CRITIC = 3e-3
+    INITIAL_LR_TEMP = 3e-4
     MAX_T = int(1e5)
     BUF_SIZE = MAX_T // 10
     CKPT_T = MAX_T // 10
-    TEMP_DECAY = -1e-4
     SEEDS = [12345, 54321, 464738, 250917]
-    ER_DECAY1 = 2e-5
-    ER_DECAY2 = 2e-4
-    T_ER_THRESH = 6e4
-    x = np.arange(MAX_T)
-    EXP_RATE = np.piecewise(x, [x < T_ER_THRESH], [lambda t : np.exp(-t * ER_DECAY1), lambda t : np.exp(-(t-T_ER_THRESH) * ER_DECAY2) / np.exp(T_ER_THRESH * ER_DECAY1)])
+    #ER_DECAY1 = 2e-5
+    #ER_DECAY2 = 2e-4
+    #T_ER_THRESH = 6e4
+    #x = np.arange(MAX_T)
+    #EXP_RATE = np.piecewise(x, [x < T_ER_THRESH], [lambda t : np.exp(-t * ER_DECAY1), lambda t : np.exp(-(t-T_ER_THRESH) * ER_DECAY2) / np.exp(T_ER_THRESH * ER_DECAY1)])
 
     print(f"Will checkpoint every {CKPT_T} episodes")
     # torch.autograd.set_detect_anomaly(True)
@@ -258,24 +266,29 @@ def main():
         replay_buffer = []
         pi_optimizer = []
         q_optimizer = []
+        temperature_optimizer = []
+        target_entropy = [-1] * N_AGENTS # SAC paper recommends an entropy of minus the dimension of the action space
+        log_temperature = []
         for i in range(N_AGENTS):
             replay_buffer.append(ReplayBuffer(obs_dim=N_AGENTS, act_dim=1, size=BUF_SIZE))
             pi_optimizer.append(torch.optim.Adam(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
             q_optimizer.append(torch.optim.Adam(q_params[i], lr=INITIAL_LR_CRITIC))
+            log_temperature.append(torch.zeros(1, requires_grad=True))
+            temperature_optimizer.append(torch.optim.Adam([log_temperature[i]], lr=INITIAL_LR_TEMP))
         action = torch.zeros([N_AGENTS]).to(device)
         price = torch.zeros([N_AGENTS]).to(device)
         for t in tqdm(range(MAX_T)):
             with torch.no_grad():
                 for i in range(N_AGENTS):
                     # Randomly explore at the beginning
-                    if t < BATCH_SIZE:
+                    if t < BATCH_SIZE * 10:
                         action[i] = torch.rand(1)
                     else:
                         # Choose the deterministic policy more often
-                        if np.random.rand() < EXP_RATE[t]:
-                            action[i] = ac[i].act(state, deterministic=False).squeeze()
-                        else:
-                            action[i] = ac[i].act(state, deterministic=True).squeeze()
+                        #if np.random.rand() < EXP_RATE[t]:
+                        action[i] = ac[i].act(state, deterministic=False).squeeze()
+                        #else:
+                        #    action[i] = ac[i].act(state, deterministic=True).squeeze()
                     price[i] = scale_price(action[i], c)
                 profit = compute_profit(ai, a0, mu, c, price)
                 for i in range(N_AGENTS):
@@ -286,22 +299,25 @@ def main():
                     for i in range(N_AGENTS):
                         ac[i].checkpoint(seed, out_dir, t, i)
                         ac_targ[i].checkpoint(f"target{seed}", out_dir, t, i)
-                q_loss, pi_loss = zip(
+                q_loss, pi_loss, temp_loss = zip(
                     *[
                         update(
                             ac[i],
                             ac_targ[i],
                             q_optimizer[i],
                             pi_optimizer[i],
+                            temperature_optimizer[i],
+                            target_entropy[i],
+                            log_temperature[i],
                             q_params[i],
                             data=replay_buffer[i].sample_batch(BATCH_SIZE),
-                            temp=np.exp(TEMP_DECAY * t),
                         )
                         for i in range(N_AGENTS)
                     ]
                 )
                 writer.add_scalars("pi_loss", {f"{i}": pi_loss[i] for i in range(N_AGENTS)}, t)
                 writer.add_scalars("q_loss", {f"{i}": q_loss[i] for i in range(N_AGENTS)}, t)
+                writer.add_scalars("temp_loss", {f"{i}": temp_loss[i] for i in range(N_AGENTS)}, t)
             writer.add_scalars("price", {f"{i}": price[i] for i in range(N_AGENTS)}, t)
             writer.add_scalars("profit", {f"{i}": profit[i] for i in range(N_AGENTS)}, t)
         for i in range(N_AGENTS):
