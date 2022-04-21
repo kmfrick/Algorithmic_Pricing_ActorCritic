@@ -149,8 +149,7 @@ def compute_profit(ai, a0, mu, c, p):
 
 def update(ac, ac_targ, q_optimizer, pi_optimizer, temperature_optimizer, target_entropy, log_temperature, q_params, data):
     TARG_UPDATE_RATE = 0.999
-    # First run one gradient descent step for Q1 and Q2
-    q_optimizer.zero_grad(set_to_none=True)
+
     DISCOUNT = 0.99
     o, a, r, o2 = data["obs"], data["act"], data["rew"], data["obs2"]
 
@@ -160,11 +159,10 @@ def update(ac, ac_targ, q_optimizer, pi_optimizer, temperature_optimizer, target
         p.requires_grad = False
 
     # Next run one gradient descent step for pi.
-    pi_optimizer.zero_grad(set_to_none=True)
-    pi, logp_pi = ac.pi(o)
 
+    pi, logp_pi = ac.pi(o)
     loss_temp = -(log_temperature * (logp_pi + target_entropy).detach()).mean()
-    temperature_optimizer.zero_grad()
+    temperature_optimizer.zero_grad(set_to_none=True)
     loss_temp.backward()
     temperature_optimizer.step()
     temp = log_temperature.exp()
@@ -173,6 +171,7 @@ def update(ac, ac_targ, q_optimizer, pi_optimizer, temperature_optimizer, target
     q2_pi = ac.q2(o, pi)
     q_pi = torch.min(q1_pi, q2_pi)
     # Entropy-regularized policy loss
+    pi_optimizer.zero_grad(set_to_none=True)
     loss_pi = (temp * logp_pi - q_pi).mean()
     loss_pi.backward()
     pi_optimizer.step()
@@ -196,6 +195,7 @@ def update(ac, ac_targ, q_optimizer, pi_optimizer, temperature_optimizer, target
     loss_q1 = F.smooth_l1_loss(q1, backup)
     loss_q2 = F.smooth_l1_loss(q2, backup)
     loss_q = loss_q1 + loss_q2
+    q_optimizer.zero_grad(set_to_none=True)
     loss_q.backward()
     q_optimizer.step()
 

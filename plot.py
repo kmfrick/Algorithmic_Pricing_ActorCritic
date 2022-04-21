@@ -56,9 +56,10 @@ def df(f, x):
     it.iternext() # step to next dimension
   return grad
 
-def grad_desc(f, x, i, thresh=1e-7, lr=1e-4):
-    while np.abs(df(f, x))[i] > thresh:
+def grad_desc(f, x, i, thresh=1e-5, lr=1e-4):
+    while np.abs(lr * df(f, x))[i] > thresh:
         x[i] += lr * df(f, x)[i]
+        print(x)
     return x[i]
 
 def main():
@@ -70,7 +71,7 @@ def main():
     HIDDEN_SIZE = 256
     MAX_T = int(1e5)
     STARTING_PROFIT_GAIN = 0.9
-    SEEDS = [12345, 54321, 464738, 250917]
+    SEEDS = [50321, 250917]
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
     root_dir = sys.argv[1]
 
@@ -135,6 +136,7 @@ def main():
                 price[i] = scale_price(actor[i].act(state, deterministic=True), c)
             if t == (ir_periods / 2):
                 price[0] = torch.tensor(grad_desc(Pi, price.numpy(), 0))
+                print("Grad descent done")
             if t >= (ir_periods / 2):
                 dev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods/2)
             price_history[:, t] = price
