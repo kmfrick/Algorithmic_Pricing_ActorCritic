@@ -13,6 +13,7 @@ from cycler import cycler
 
 from main import MLPActorCritic, scale_price
 
+
 def plot_heatmap(arr, title, c=1, w=100):
     for i, a in enumerate(arr):
         ax = plt.subplot()
@@ -29,37 +30,40 @@ def plot_heatmap(arr, title, c=1, w=100):
         ax.set_title(f"{title}; Agent {i}")
         plt.show()
 
+
 # https://cs231n.github.io/optimization-1/#gradcompute
 def df(f, x):
-  """
+    """
   a naive implementation of numerical gradient of f at x
   - f should be a function that takes a single argument
   - x is the point (numpy array) to evaluate the gradient at
   """
-  fx = f(x) # evaluate function value at original point
-  grad = np.zeros(x.shape)
-  h = 0.00001
-  # iterate over all indexes in x
-  it = np.nditer(x, flags=['multi_index'], op_flags=['readwrite'])
-  while not it.finished:
-    # evaluate function at x+h
-    ix = it.multi_index
-    old_value = x[ix]
-    x[ix] = old_value + h # increment by h
-    fxh = f(x) # evalute f(x + h)
-    x[ix] = old_value # restore to previous value (very important!)
-    x[ix] = old_value - h
-    fxmh = f(x)
-    x[ix] = old_value # restore to previous value (very important!)
-    # compute the partial derivative
-    grad[ix] = (fxh[ix] - fxmh[ix]) / (2*h) # the slope
-    it.iternext() # step to next dimension
-  return grad
+    fx = f(x)  # evaluate function value at original point
+    grad = np.zeros(x.shape)
+    h = 0.00001
+    # iterate over all indexes in x
+    it = np.nditer(x, flags=["multi_index"], op_flags=["readwrite"])
+    while not it.finished:
+        # evaluate function at x+h
+        ix = it.multi_index
+        old_value = x[ix]
+        x[ix] = old_value + h  # increment by h
+        fxh = f(x)  # evalute f(x + h)
+        x[ix] = old_value  # restore to previous value (very important!)
+        x[ix] = old_value - h
+        fxmh = f(x)
+        x[ix] = old_value  # restore to previous value (very important!)
+        # compute the partial derivative
+        grad[ix] = (fxh[ix] - fxmh[ix]) / (2 * h)  # the slope
+        it.iternext()  # step to next dimension
+    return grad
+
 
 def grad_desc(f, x, i, thresh=1e-7, lr=1e-4):
     while np.abs(df(f, x))[i] > thresh:
         x[i] += lr * df(f, x)[i]
     return x[i]
+
 
 def main():
     nash_price = 1.4729273733327568
@@ -124,7 +128,7 @@ def main():
             for i in range(N_AGENTS):
                 price[i] = scale_price(actor[i].act(state, deterministic=True), c)
             if t >= (ir_periods / 2):
-                nondev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods/2)
+                nondev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods / 2)
             price_history[:, t] = price
             state = price
         # Now compute deviation profits
@@ -136,7 +140,7 @@ def main():
             if t == (ir_periods / 2):
                 price[0] = torch.tensor(grad_desc(Pi, price.numpy(), 0))
             if t >= (ir_periods / 2):
-                dev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods/2)
+                dev_profit += Pi(price.numpy())[0] * DISCOUNT ** (t - ir_periods / 2)
             price_history[:, t] = price
             state = price
         print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}")
