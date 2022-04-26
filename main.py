@@ -2,6 +2,8 @@ import copy
 import os
 import sys
 import itertools
+import math
+import random
 
 from tqdm.auto import tqdm
 
@@ -10,7 +12,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as D
 from torch.profiler import profile, record_function, ProfilerActivity
 
 from cpprb import ReplayBuffer
@@ -34,6 +35,7 @@ class SquashedGaussianMLPActor(nn.Module):
         self.net = mlp([obs_dim] + list(hidden_sizes), activation, activation)
         self.mu_layer = nn.Linear(hidden_sizes[-1], act_dim)
         self.log_std_layer = nn.Linear(hidden_sizes[-1], act_dim)
+        self.lz = math.log(math.sqrt(2 * math.pi))
 
     def forward(self, obs, deterministic=False, with_logprob=True):
         net_out = self.net(obs)
@@ -43,12 +45,11 @@ class SquashedGaussianMLPActor(nn.Module):
         std = torch.exp(log_std)
 
         # Pre-squash distribution and sample
-        pi_distribution = D.Normal(mu, std)
         if deterministic:
             # Only used for evaluating policy at test time.
             pi_action = mu
         else:
-            pi_action = pi_distribution.rsample()
+            pi_action = random.gauss(0, 1) * std + mu
 
         if with_logprob:
             # Compute logprob from Gaussian, and then apply correction for sigmoid squashing.
@@ -56,7 +57,8 @@ class SquashedGaussianMLPActor(nn.Module):
             # in appendix C, but using the derivative of the sigmoid instead of tanh
             # It is more numerically stable than using the sigmoid derivative expressed as s(x) * (1 - s(x))
             # This can be tested by computing it for torch.linspace(-20, 20, 1000) for example
-            logp_pi = pi_distribution.log_prob(pi_action).sum(axis=-1)
+            var = std ** 2
+            logp_pi = -(((pi_action - mu) ** 2) / (2 * var) - log_std - self.lz).sum(axis=-1)
             logp_pi += (2 * F.softplus(-pi_action) + pi_action).sum(dim=1)
         else:
             logp_pi = None
@@ -87,17 +89,15 @@ class MLPValueFunction(nn.Module):
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_sizes=(512, 512), activation=nn.LeakyReLU):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, device, activation=nn.LeakyReLU):
         super().__init__()
-        self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
         # build policy and value functions
-        self.pi = SquashedGaussianMLPActor(obs_dim, act_dim, hidden_sizes, activation).to(
-            self.device
-        )
-        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(self.device)
-        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(self.device)
-        self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(self.device)
+        self.pi = SquashedGaussianMLPActor(obs_dim, act_dim, hidden_sizes, activation).to(device)
+        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(device)
+        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(device)
+        self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(device)
+
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():
@@ -105,26 +105,8 @@ class MLPActorCritic(nn.Module):
             return a
 
     def checkpoint(self, fpostfix, out_dir, t, i):
-        torch.save(
-            self.pi.state_dict(), f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth",
-        )
-        torch.save(self.q1.state_dict(), f"{out_dir}/q1_weights_{fpostfix}_t{t}_agent{i}.pth")
-        torch.save(self.q2.state_dict(), f"{out_dir}/q2_weights_{fpostfix}_t{t}_agent{i}.pth")
-
-
-def save_state_action_map(actor, n_agents, c, fpostfix, out_dir):
-    grid_size = 100
-    w = torch.linspace(c, c + 1, grid_size, requires_grad=False)
-    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-    with torch.no_grad():
-        for i in range(n_agents):
-            A = torch.zeros([grid_size, grid_size], requires_grad=False)
-            for ai, p1 in enumerate(w):
-                for aj, p2 in enumerate(w):
-                    state = torch.tensor([[p1, p2]]).to(device)
-                    a = scale_price(actor[i].act(state, deterministic=True), c)
-                    A[ai, aj] = a
-            np.save(f"{out_dir}/actions_{fpostfix}_{i}.npy", A.cpu().detach().numpy())
+        torch.save(self.pi, f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
+        torch.save(self.v, f"{out_dir}/value_weights_{fpostfix}_t{t}_agent{i}.pth")
 
 
 def compute_profit(ai, a0, mu, c, p):
@@ -138,16 +120,13 @@ def get_action(ac, o, deterministic=False):
 
 
 def scale_price(price, c):
-    return price + c
+    return price * c + c
 
 
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} OUT_DIR")
         exit(1)
-    out_dir = sys.argv[1]
-    os.makedirs(out_dir, exist_ok=True)
-    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
     n_agents = 2
     ai = 2
     a0 = 0
@@ -159,12 +138,15 @@ def main():
     INITIAL_LR_CRITIC = 3e-4
     INITIAL_LR_TEMP = 3e-4
     AVG_REW_LR = 0.01
-    MAX_T = int(5e5)
-    BUF_SIZE = MAX_T // 10
-    CKPT_T = MAX_T // 10
+    MAX_T = int(1e5)
+    BUF_SIZE = int(5e3)
+    CKPT_T = int(5e3)
     TARG_UPDATE_RATE = 0.999
-    TARGET_ENTROPY = -2
+    TARGET_ENTROPY = -1
+    out_dir = f"{sys.argv[1]}_bs{BATCH_SIZE}_hs{HIDDEN_SIZE}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}_rewlr{AVG_REW_LR}_buf{BUF_SIZE}_h{TARGET_ENTROPY}"
+    os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
+    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
     SEEDS = [250917]
 
@@ -178,16 +160,7 @@ def main():
         state = torch.rand(n_agents).to(device) + c
         state = state.unsqueeze(0)
         ac = []
-        for i in range(n_agents):
-            ac.append(MLPActorCritic(n_agents, 1, hidden_sizes=(HIDDEN_SIZE,) * n_agents))
-            print(ac[i])
-        ac_targ = copy.deepcopy(ac)
-        for i in range(n_agents):
-            for p in ac_targ[i].parameters():
-                p.requires_grad = False
-        q_params = [
-            itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters()) for i in range(n_agents)
-        ]
+        q_params = []
         replay_buffer = []
         pi_optimizer = []
         q_optimizer = []
@@ -195,6 +168,9 @@ def main():
         temp_optimizer = []
         log_temp = []
         for i in range(n_agents):
+            ac.append(MLPActorCritic(n_agents, 1, device=device, hidden_sizes=(HIDDEN_SIZE,) * n_agents))
+            print(ac[i])
+            q_params.append(itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters()))
             replay_buffer.append(
                 ReplayBuffer(
                     BUF_SIZE,
@@ -211,6 +187,11 @@ def main():
             v_optimizer.append(torch.optim.Adam(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
             log_temp.append(torch.zeros(1, device=device, requires_grad=True))
             temp_optimizer.append(torch.optim.Adam([log_temp[i]], lr=INITIAL_LR_TEMP))
+        # Create targt network
+        ac_targ = copy.deepcopy(ac)
+        for i in range(n_agents):
+            for p in ac_targ[i].parameters():
+                p.requires_grad = False
         avg_rew = torch.zeros([n_agents]).to(device)
         action = torch.zeros([n_agents]).to(device)
         price = torch.zeros([n_agents]).to(device)
