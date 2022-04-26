@@ -24,7 +24,6 @@ def mlp(sizes, activation, output_activation=nn.Identity):
     return nn.Sequential(*layers)
 
 
-
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
@@ -51,8 +50,6 @@ class SquashedGaussianMLPActor(nn.Module):
         else:
             pi_action = pi_distribution.rsample()
 
-
-
         if with_logprob:
             # Compute logprob from Gaussian, and then apply correction for sigmoid squashing.
             # This formula is computed with the same procedure as the original SAC paper (arXiv 1801.01290)
@@ -65,8 +62,6 @@ class SquashedGaussianMLPActor(nn.Module):
             logp_pi = None
 
         pi_action = torch.sigmoid(pi_action)
-
-
 
         return pi_action, logp_pi
 
@@ -94,23 +89,15 @@ class MLPValueFunction(nn.Module):
 class MLPActorCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes=(512, 512), activation=nn.LeakyReLU):
         super().__init__()
-        self.device = (
-            torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-        )
+        self.device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
         # build policy and value functions
-        self.pi = SquashedGaussianMLPActor(
-            obs_dim, act_dim, hidden_sizes, activation
-        ).to(self.device)
-        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(
+        self.pi = SquashedGaussianMLPActor(obs_dim, act_dim, hidden_sizes, activation).to(
             self.device
         )
-        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(
-            self.device
-        )
-        self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(
-            self.device
-        )
+        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(self.device)
+        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(self.device)
+        self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(self.device)
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():
@@ -119,15 +106,10 @@ class MLPActorCritic(nn.Module):
 
     def checkpoint(self, fpostfix, out_dir, t, i):
         torch.save(
-            self.pi.state_dict(),
-            f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth",
+            self.pi.state_dict(), f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth",
         )
-        torch.save(
-            self.q1.state_dict(), f"{out_dir}/q1_weights_{fpostfix}_t{t}_agent{i}.pth"
-        )
-        torch.save(
-            self.q2.state_dict(), f"{out_dir}/q2_weights_{fpostfix}_t{t}_agent{i}.pth"
-        )
+        torch.save(self.q1.state_dict(), f"{out_dir}/q1_weights_{fpostfix}_t{t}_agent{i}.pth")
+        torch.save(self.q2.state_dict(), f"{out_dir}/q2_weights_{fpostfix}_t{t}_agent{i}.pth")
 
 
 def save_state_action_map(actor, n_agents, c, fpostfix, out_dir):
@@ -146,15 +128,9 @@ def save_state_action_map(actor, n_agents, c, fpostfix, out_dir):
 
 
 def compute_profit(ai, a0, mu, c, p):
-    q = torch.exp((ai - p) / mu) / (
-        torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu)
-    )
+    q = torch.exp((ai - p) / mu) / (torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu))
     pi = (p - c) * q
     return pi
-
-
-
-
 
 
 def get_action(ac, o, deterministic=False):
@@ -164,7 +140,6 @@ def get_action(ac, o, deterministic=False):
 def scale_price(price, c):
     return price + c
 
-NASH_PRICE = 1.47293
 
 def main():
     if len(sys.argv) < 2:
@@ -178,22 +153,19 @@ def main():
     a0 = 0
     mu = 0.25
     c = 1
-    BATCH_SIZE = 256
-    IR_PERIODS = 50
-    HIDDEN_SIZE = 256
+    BATCH_SIZE = 512
+    HIDDEN_SIZE = 2048
     INITIAL_LR_ACTOR = 3e-3
-    INITIAL_LR_CRITIC = 3e-3
-    INITIAL_LR_TEMP = 3e-3
+    INITIAL_LR_CRITIC = 3e-4
+    INITIAL_LR_TEMP = 3e-4
     AVG_REW_LR = 0.01
-    MAX_T = int(1e5)
+    MAX_T = int(5e5)
     BUF_SIZE = MAX_T // 10
     CKPT_T = MAX_T // 10
     TARG_UPDATE_RATE = 0.999
-    TARGET_ENTROPY = -1
+    TARGET_ENTROPY = -2
     print(f"Will checkpoint every {CKPT_T} episodes")
 
-    NASH_PRICE = 1.47293
-    COOP_PRICE = 1.92497
     SEEDS = [250917]
 
     # torch.autograd.set_detect_anomaly(True)
@@ -214,8 +186,7 @@ def main():
             for p in ac_targ[i].parameters():
                 p.requires_grad = False
         q_params = [
-            itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters())
-            for i in range(n_agents)
+            itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters()) for i in range(n_agents)
         ]
         replay_buffer = []
         pi_optimizer = []
@@ -224,11 +195,17 @@ def main():
         temp_optimizer = []
         log_temp = []
         for i in range(n_agents):
-            replay_buffer.append(ReplayBuffer(BUF_SIZE, env_dict = { "obs": {"shape": n_agents},
-                                                        "act": {"shape": 1},
-                                                        "rew": {},
-                                                        "obs2": {"shape": n_agents}
-            }))
+            replay_buffer.append(
+                ReplayBuffer(
+                    BUF_SIZE,
+                    env_dict={
+                        "obs": {"shape": n_agents},
+                        "act": {"shape": 1},
+                        "rew": {},
+                        "obs2": {"shape": n_agents},
+                    },
+                )
+            )
             pi_optimizer.append(torch.optim.Adam(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
             q_optimizer.append(torch.optim.Adam(q_params[i], lr=INITIAL_LR_CRITIC))
             v_optimizer.append(torch.optim.Adam(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
@@ -256,10 +233,20 @@ def main():
                         price_history[i, t] = price[i]
                     profits = compute_profit(ai, a0, mu, c, price)
                     for i in range(n_agents):
-                        replay_buffer[i].add(obs=state.cpu(), act=action[i].cpu(), rew=profits[i].cpu(), obs2=price.cpu())
+                        replay_buffer[i].add(
+                            obs=state.cpu(),
+                            act=action[i].cpu(),
+                            rew=profits[i].cpu(),
+                            obs2=price.cpu(),
+                        )
                         total_reward[i, t] = profits[i]
                         with torch.no_grad():
-                            avg_rew[i] += AVG_REW_LR * (profits[i] - avg_rew[i] + ac_targ[i].v(price.squeeze()) - ac_targ[i].v(state.squeeze()))
+                            avg_rew[i] += AVG_REW_LR * (
+                                profits[i]
+                                - avg_rew[i]
+                                + ac_targ[i].v(price.squeeze())
+                                - ac_targ[i].v(state.squeeze())
+                            )
                     state = price.unsqueeze(0)
                     if t > 0 and t % CKPT_T == 0:
                         for i in range(n_agents):
@@ -269,7 +256,12 @@ def main():
                     for i in range(n_agents):
                         batch = replay_buffer[i].sample(BATCH_SIZE)
 
-                        o, a, r, o2 = torch.tensor(batch["obs"],  device=device).squeeze(), torch.tensor(batch["act"],  device=device), torch.tensor(batch["rew"],  device=device).squeeze(), torch.tensor(batch["obs2"],  device=device).squeeze()
+                        o, a, r, o2 = (
+                            torch.tensor(batch["obs"], device=device).squeeze(),
+                            torch.tensor(batch["act"], device=device),
+                            torch.tensor(batch["rew"], device=device).squeeze(),
+                            torch.tensor(batch["obs2"], device=device).squeeze(),
+                        )
                         # Freeze Q-networks so you don't waste computational effort
                         # computing gradients for them during the policy learning step.
                         for p in q_params[i]:
@@ -295,9 +287,6 @@ def main():
                         # Unfreeze Q-networks so you can optimize it at next DDPG step.
                         for p in q_params[i]:
                             p.requires_grad = True
-
-
-
 
                         q1 = ac[i].q1(o, a)
                         q2 = ac[i].q2(o, a)
@@ -338,54 +327,28 @@ def main():
                                 # params, as opposed to "mul" and "add", which would make new tensors.
                                 p_targ.data.mul_(TARG_UPDATE_RATE)
                         p_targ.data.add_((1 - TARG_UPDATE_RATE) * p.data)
-                        q_loss[i], pi_loss[i], v_loss[i] = loss_q.item(), loss_pi.item(), loss_v.item()
+                        q_loss[i], pi_loss[i], v_loss[i] = (
+                            loss_q.item(),
+                            loss_pi.item(),
+                            loss_v.item(),
+                        )
                     q_loss = np.round(q_loss, 3)
                     pi_loss = np.round(pi_loss, 3)
                     v_loss = np.round(v_loss, 3)
                     with torch.no_grad():
                         start_t = t - BATCH_SIZE
-                        avg_prof = np.round(
-                            torch.mean(total_reward[:, start_t:t], dim=1).cpu().numpy(),
-                            3,
-                        )
                         avg_price = np.round(
-                            torch.mean(price_history[:, start_t:t], dim=1)
-                            .cpu()
-                            .numpy(),
-                            3,
+                            torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3,
                         )
-                        avg_profit = np.round(
-                            avg_rew.cpu().detach().numpy(),
-                            3,
-                        )
-                        temp = np.round(
-                            np.array([a.exp().item() for a in log_temp]),
-                            3,
-                        )
+                        avg_profit = np.round(avg_rew.cpu().detach().numpy(), 3,)
+                        temp = np.round(np.array([a.exp().item() for a in log_temp]), 3,)
                     t_tq.set_postfix_str(
-                        f"p = {avg_price}, P = {avg_prof}, QL = {q_loss}, PL = {pi_loss}, VL = {v_loss}, temp = {temp}, r = {avg_profit}"
+                        f"p = {avg_price}, P = {avg_profit}, QL = {q_loss}, PL = {pi_loss}, VL = {v_loss}, temp = {temp}"
                     )
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward.detach())
         for i in range(n_agents):
-            ac[i].checkpoint(fpostfix, out_dir, t, i)
-            ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
-        save_state_action_map(ac, n_agents, c, f"final_{fpostfix}", out_dir)
-        # Impulse response
-        with torch.no_grad():
-            ir_profits = torch.zeros([n_agents, IR_PERIODS])
-            ir_prices = torch.zeros([n_agents, IR_PERIODS])
-            for t in range(IR_PERIODS):
-                for i in range(n_agents):
-                    price[i] = scale_price(ac[i].act(state, deterministic=True), c)
-                    ir_prices[i, t] = price[i]
-                if (IR_PERIODS / 2) <= t <= (IR_PERIODS / 2 + 3):
-                    price[0] = NASH_PRICE
-                    ir_prices[0, t] = price[0]
-                ir_profits[:, t] = compute_profit(ai, a0, mu, c, price)
-                state = price
-            np.save(f"{out_dir}/ir_profits_{fpostfix}_t{t}.npy", ir_profits.detach())
-            np.save(f"{out_dir}/ir_prices_{fpostfix}_t{t}.npy", ir_prices.detach())
-        print("Impulse responses computed.")
+            ac[i].checkpoint(fpostfix, out_dir, MAX_T, i)
+            ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, MAX_T, i)
 
 
 if __name__ == "__main__":
