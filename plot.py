@@ -13,7 +13,7 @@ import torch
 from cycler import cycler
 
 from main import SquashedGaussianMLPActor, MLPQFunction, MLPValueFunction, MLPActorCritic, scale_price
-
+from utils import df, grad_desc
 
 def plot_heatmap(arr, title, c=1, w=100):
     plt.tight_layout()
@@ -32,39 +32,6 @@ def plot_heatmap(arr, title, c=1, w=100):
         plt.colorbar(orientation="horizontal")
     plt.show()
 
-
-# https://cs231n.github.io/optimization-1/#gradcompute
-def df(f, x):
-    """
-  a naive implementation of numerical gradient of f at x
-  - f should be a function that takes a single argument
-  - x is the point (numpy array) to evaluate the gradient at
-  """
-    fx = f(x)  # evaluate function value at original point
-    grad = np.zeros(x.shape)
-    h = 0.00001
-    # iterate over all indexes in x
-    it = np.nditer(x, flags=["multi_index"], op_flags=["readwrite"])
-    while not it.finished:
-        # evaluate function at x+h
-        ix = it.multi_index
-        old_value = x[ix]
-        x[ix] = old_value + h  # increment by h
-        fxh = f(x)  # evalute f(x + h)
-        x[ix] = old_value  # restore to previous value (very important!)
-        x[ix] = old_value - h
-        fxmh = f(x)
-        x[ix] = old_value  # restore to previous value (very important!)
-        # compute the partial derivative
-        grad[ix] = (fxh[ix] - fxmh[ix]) / (2 * h)  # the slope
-        it.iternext()  # step to next dimension
-    return grad
-
-
-def grad_desc(f, x, i, thresh=1e-7, lr=1e-4):
-    while np.abs(df(f, x))[i] > thresh:
-        x[i] += lr * df(f, x)[i]
-    return x[i]
 
 
 def main():
