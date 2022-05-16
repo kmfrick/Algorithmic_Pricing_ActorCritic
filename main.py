@@ -13,8 +13,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
-
 from cpprb import ReplayBuffer
+
+from utils import grad_desc, df
+
+import logging
+import optuna
+from optuna.trial import TrialState
 
 # Soft Actor-Critic from OpenAI https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
 def mlp(sizes, activation, output_activation=nn.Identity):
@@ -123,34 +128,33 @@ def scale_price(price, c):
     return price * c + c
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} OUT_DIR")
-        exit(1)
+def objective(trial):
     n_agents = 2
     ai = 2
     a0 = 0
     mu = 0.25
     c = 1
-    BATCH_SIZE = 512
-    HIDDEN_SIZE = 2048
-    INITIAL_LR_ACTOR = 3e-3
-    INITIAL_LR_CRITIC = 3e-4
-    INITIAL_LR_TEMP = 3e-4
-    AVG_REW_LR = 0.01
+    BATCH_SIZE = 2 ** trial.suggest_int("batch", 4, 7) # 16 to 128
+    HIDDEN_SIZE = 2 ** trial.suggest_int("hidden_size", 10, 12) # 1024 to 4096
+    INITIAL_LR_ACTOR = trial.suggest_uniform("actor_lr", 1e-6, 9e-4)
+    INITIAL_LR_CRITIC = trial.suggest_uniform("critic_lr", 1e-6, 9e-4)
+    INITIAL_LR_TEMP = trial.suggest_uniform("temp_lr", 1e-6, 9e-4)
+    AVG_REW_LR = trial.suggest_uniform("avg_rew_lr", 0.01, 0.05)
+    TARGET_ENTROPY = -trial.suggest_uniform("target_entropy", 1e-2, 10)
+    BUF_SIZE = trial.suggest_int("buf_size", 5000, 10000, 1000)
+    print(trial.params)
     MAX_T = int(1e5)
-    BUF_SIZE = int(5e3)
     CKPT_T = int(5e3)
     TARG_UPDATE_RATE = 0.999
-    TARGET_ENTROPY = -1
     out_dir = f"{sys.argv[1]}_bs{BATCH_SIZE}_hs{HIDDEN_SIZE}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}_rewlr{AVG_REW_LR}_buf{BUF_SIZE}_h{TARGET_ENTROPY}"
     os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
-    SEEDS = [250917]
+    SEEDS = [250917, 50321, 200722]
 
     # torch.autograd.set_detect_anomaly(True)
+    avg_dev_gain = 0
     for session in range(len(SEEDS)):
         fpostfix = SEEDS[session]
         # Random seeds
@@ -169,7 +173,6 @@ def main():
         log_temp = []
         for i in range(n_agents):
             ac.append(MLPActorCritic(n_agents, 1, device=device, hidden_sizes=(HIDDEN_SIZE,) * n_agents))
-            print(ac[i])
             q_params.append(itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters()))
             replay_buffer.append(
                 ReplayBuffer(
@@ -182,11 +185,11 @@ def main():
                     },
                 )
             )
-            pi_optimizer.append(torch.optim.Adam(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
-            q_optimizer.append(torch.optim.Adam(q_params[i], lr=INITIAL_LR_CRITIC))
-            v_optimizer.append(torch.optim.Adam(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
+            pi_optimizer.append(torch.optim.RMSprop(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
+            q_optimizer.append(torch.optim.RMSprop(q_params[i], lr=INITIAL_LR_CRITIC))
+            v_optimizer.append(torch.optim.RMSprop(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
             log_temp.append(torch.zeros(1, device=device, requires_grad=True))
-            temp_optimizer.append(torch.optim.Adam([log_temp[i]], lr=INITIAL_LR_TEMP))
+            temp_optimizer.append(torch.optim.RMSprop([log_temp[i]], lr=INITIAL_LR_TEMP))
         # Create targt network
         ac_targ = copy.deepcopy(ac)
         for i in range(n_agents):
@@ -327,9 +330,85 @@ def main():
                         f"p = {avg_price}, P = {avg_profit}, QL = {q_loss}, PL = {pi_loss}, VL = {v_loss}, temp = {temp}"
                     )
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward.detach())
+        ir_periods = 20
+        nash_price = 1.4729273733327568
+        coop_price = 1.9249689958811602
+        STARTING_PROFIT_GAIN=0.8
+        def Pi(p):
+            q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
+            pi = (p - c) * q
+            return pi
+        with torch.no_grad():
+# Impulse response
+            state = torch.rand(n_agents).to(device) * c + c 
+            for i in range(0, n_agents):
+                state[i] = (coop_price - nash_price) * STARTING_PROFIT_GAIN + nash_price
+            print(f"Initial state = {state}")
+            price = state.clone()
+            initial_state = state.clone()
+# First compute non-deviation profits
+            DISCOUNT = 0.99
+            nondev_profit = 0 
+            j = 1 
+            leg = ["Non-deviating agent"] * n_agents
+            leg[j] = "Deviating agent"
+            for t in range(ir_periods):
+                for i in range(n_agents):
+                    price[i] = scale_price(ac[i].act(state.unsqueeze(0))[0], c)
+                if t >= (ir_periods / 2): 
+                    nondev_profit += Pi(price.cpu().numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
+                state = price
+# Now compute deviation profits
+            dev_profit = 0 
+            state = initial_state.clone()
+            for t in range(ir_periods):
+                for i in range(n_agents):
+                    price[i] = scale_price(ac[i].act(state.unsqueeze(0))[0], c)
+                if t == (ir_periods / 2): 
+                    br = grad_desc(Pi, price.cpu().numpy(), j, thresh=1e-5)
+                    price[j] = torch.tensor(br)
+                if t >= (ir_periods / 2): 
+                    dev_profit += Pi(price.cpu().numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
+                state = price
+            dev_gain = (dev_profit / nondev_profit - 1) * 100 
+            print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%")
+
         for i in range(n_agents):
             ac[i].checkpoint(fpostfix, out_dir, MAX_T, i)
             ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, MAX_T, i)
+        avg_dev_gain += dev_gain
+    return avg_dev_gain / len(SEEDS)
+
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} OUT_DIR")
+        exit(1)
+    # Add stream handler of stdout to show the messages
+    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
+    study_name = sys.argv[1]  # Unique identifier of the study.
+    storage_name = "sqlite:///{}.db".format(study_name)
+    study = optuna.create_study(study_name=study_name, storage=storage_name, direction = "minimize")
+    study.optimize(objective, n_trials=10)
+
+    pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
+    complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
+
+    print("Study statistics: ")
+    print("  Number of finished trials: ", len(study.trials))
+    print("  Number of pruned trials: ", len(pruned_trials))
+    print("  Number of complete trials: ", len(complete_trials))
+
+    print("Best trial:")
+    trial = study.best_trial
+
+    print("  Value: ", trial.value)
+
+    print("  Params: ")
+    for key, value in trial.params.items():
+        print("    {}: {}".format(key, value))
+
 
 
 if __name__ == "__main__":
