@@ -26,6 +26,7 @@ def mlp(sizes, activation, output_activation=nn.Identity):
     layers = []
     for j in range(len(sizes) - 1):
         act = activation if j < len(sizes) - 2 else output_activation
+        #bn = (lambda : nn.BatchNorm1d(sizes[j + 1])) if  j < len(sizes) - 2 else nn.Identity
         layers += [nn.Linear(sizes[j], sizes[j + 1]), act()]
     return nn.Sequential(*layers)
 
@@ -72,6 +73,8 @@ class SquashedGaussianMLPActor(nn.Module):
 
         return pi_action, logp_pi
 
+def softabs(x):
+    return torch.where(torch.abs(x) < 1, 0.5 * x ** 2, -0.5 + torch.abs(x))
 
 class MLPQFunction(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
@@ -89,6 +92,8 @@ class MLPValueFunction(nn.Module):
         self.v = mlp([obs_dim] + list(hidden_sizes) + [1], activation)
 
     def forward(self, obs):
+        if obs.dim() != 2:
+            obs = obs.unsqueeze(0)
         v = self.v(obs)
         return v.squeeze()
 
@@ -103,15 +108,16 @@ class MLPActorCritic(nn.Module):
         self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(device)
         self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(device)
 
-
     def act(self, obs, deterministic=False):
         with torch.no_grad():
+            self.eval()
             a, _ = self.pi(obs, deterministic, False)
+            self.train()
             return a
 
     def checkpoint(self, fpostfix, out_dir, t, i):
         torch.save(self.pi, f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
-        torch.save(self.v, f"{out_dir}/value_weights_{fpostfix}_t{t}_agent{i}.pth")
+        #torch.save(self.v, f"{out_dir}/value_weights_{fpostfix}_t{t}_agent{i}.pth")
 
 
 def compute_profit(ai, a0, mu, c, p):
@@ -129,27 +135,38 @@ def scale_price(price, c):
 
 
 def objective(trial):
+    torch.cuda.set_device(int(sys.argv[2]))
     n_agents = 2
     ai = 2
     a0 = 0
     mu = 0.25
     c = 1
     BATCH_SIZE = 2 ** trial.suggest_int("batch", 4, 7) # 16 to 128
-    HIDDEN_SIZE = 2 ** trial.suggest_int("hidden_size", 10, 12) # 1024 to 4096
-    INITIAL_LR_ACTOR = trial.suggest_uniform("actor_lr", 1e-6, 9e-4)
-    INITIAL_LR_CRITIC = trial.suggest_uniform("critic_lr", 1e-6, 9e-4)
-    INITIAL_LR_TEMP = trial.suggest_uniform("temp_lr", 1e-6, 9e-4)
-    AVG_REW_LR = trial.suggest_uniform("avg_rew_lr", 0.01, 0.05)
-    TARGET_ENTROPY = -trial.suggest_uniform("target_entropy", 1e-2, 10)
+    HIDDEN_SIZE = 2 ** trial.suggest_int("hidden_size", 12, 12) # 1024 to 4096
+    OPTIMIZER = trial.suggest_categorical("optim", ["Adam", "SGD", "RMSprop", "AdamW"])
+    SCHEDULER = trial.suggest_categorical("sched", ["None", "Cosine", "Step"])
+    SCHED_T = trial.suggest_int("sched_t", 1000, 10000, log=True)
+    OPTIM_DICT = {"Adam": torch.optim.Adam, "RMSprop": torch.optim.RMSprop, "SGD": torch.optim.SGD, "AdamW": torch.optim.AdamW}
+    SCHED_DICT = {"None": lambda x, y: None, "Cosine": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts, "Step": torch.optim.lr_scheduler.StepLR}
+    MIN_LR = 3e-5
+    MAX_LR = 3e-2
+    if OPTIMIZER != "Adam" and OPTIMIZER != "AdamW":
+        MIN_LR /= 100
+        MAX_LR /= 100
+    INITIAL_LR_ACTOR = trial.suggest_loguniform("actor_lr", MIN_LR, MAX_LR)
+    INITIAL_LR_CRITIC = trial.suggest_loguniform("critic_lr", MIN_LR, MAX_LR)
+    INITIAL_LR_TEMP = trial.suggest_loguniform("temp_lr", MIN_LR, MAX_LR)
+    AVG_REW_LR = trial.suggest_loguniform("profit_mean_lr", 0.01, 0.5)
+    TARGET_ENTROPY = -trial.suggest_loguniform("target_entropy", 1e-1, 10)
     BUF_SIZE = trial.suggest_int("buf_size", 5000, 10000, 1000)
     print(trial.params)
     MAX_T = int(1e5)
-    CKPT_T = int(5e3)
+    CKPT_T = int(1e4)
     TARG_UPDATE_RATE = 0.999
-    out_dir = f"{sys.argv[1]}_bs{BATCH_SIZE}_hs{HIDDEN_SIZE}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}_rewlr{AVG_REW_LR}_buf{BUF_SIZE}_h{TARGET_ENTROPY}"
+    out_dir = f"{sys.argv[1]}_bs{BATCH_SIZE}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}_rewlr{AVG_REW_LR}_buf{BUF_SIZE}_h{TARGET_ENTROPY}_optim{OPTIMIZER}_sched{SCHEDULER}_T{SCHED_T}"
     os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
-    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+    device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
 
     SEEDS = [250917, 50321, 200722]
 
@@ -170,7 +187,11 @@ def objective(trial):
         q_optimizer = []
         v_optimizer = []
         temp_optimizer = []
-        log_temp = []
+        pi_scheduler = []
+        q_scheduler = []
+        v_scheduler = []
+        temp_scheduler = []
+        log_temp = []#-torch.tensor(1, device = device)] * n_agents
         for i in range(n_agents):
             ac.append(MLPActorCritic(n_agents, 1, device=device, hidden_sizes=(HIDDEN_SIZE,) * n_agents))
             q_params.append(itertools.chain(ac[i].q1.parameters(), ac[i].q2.parameters()))
@@ -185,17 +206,21 @@ def objective(trial):
                     },
                 )
             )
-            pi_optimizer.append(torch.optim.RMSprop(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
-            q_optimizer.append(torch.optim.RMSprop(q_params[i], lr=INITIAL_LR_CRITIC))
-            v_optimizer.append(torch.optim.RMSprop(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
-            log_temp.append(torch.zeros(1, device=device, requires_grad=True))
-            temp_optimizer.append(torch.optim.RMSprop([log_temp[i]], lr=INITIAL_LR_TEMP))
+            pi_optimizer.append(OPTIM_DICT[OPTIMIZER](ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR))
+            pi_scheduler.append(SCHED_DICT[SCHEDULER](pi_optimizer[i], SCHED_T))
+            q_optimizer.append(OPTIM_DICT[OPTIMIZER](q_params[i], lr=INITIAL_LR_CRITIC))
+            q_scheduler.append(SCHED_DICT[SCHEDULER](q_optimizer[i], SCHED_T))
+            v_optimizer.append(OPTIM_DICT[OPTIMIZER](ac[i].v.parameters(), lr=INITIAL_LR_CRITIC))
+            v_scheduler.append(SCHED_DICT[SCHEDULER](v_optimizer[i], SCHED_T))
+            log_temp.append(torch.zeros(1, requires_grad=True, device=device))
+            temp_optimizer.append(OPTIM_DICT[OPTIMIZER]([log_temp[i]], lr=INITIAL_LR_TEMP))
+            temp_scheduler.append(SCHED_DICT[SCHEDULER](temp_optimizer[i], SCHED_T))
         # Create targt network
         ac_targ = copy.deepcopy(ac)
         for i in range(n_agents):
             for p in ac_targ[i].parameters():
                 p.requires_grad = False
-        avg_rew = torch.zeros([n_agents]).to(device)
+        profit_mean = torch.zeros([n_agents]).to(device)
         action = torch.zeros([n_agents]).to(device)
         price = torch.zeros([n_agents]).to(device)
         # Arrays used to save metrics
@@ -216,6 +241,9 @@ def objective(trial):
                         price[i] = scale_price(action[i], c)
                         price_history[i, t] = price[i]
                     profits = compute_profit(ai, a0, mu, c, price)
+                    with torch.no_grad():
+                        total_reward[:, t] = profits
+                        profit_mean = (1 - AVG_REW_LR) * profit_mean + AVG_REW_LR * profits
                     for i in range(n_agents):
                         replay_buffer[i].add(
                             obs=state.cpu(),
@@ -223,19 +251,11 @@ def objective(trial):
                             rew=profits[i].cpu(),
                             obs2=price.cpu(),
                         )
-                        total_reward[i, t] = profits[i]
-                        with torch.no_grad():
-                            avg_rew[i] += AVG_REW_LR * (
-                                profits[i]
-                                - avg_rew[i]
-                                + ac_targ[i].v(price.squeeze())
-                                - ac_targ[i].v(state.squeeze())
-                            )
                     state = price.unsqueeze(0)
-                    if t > 0 and t % CKPT_T == 0:
+                    if t > MAX_T / 2 and t % CKPT_T == 0:
                         for i in range(n_agents):
                             ac[i].checkpoint(fpostfix, out_dir, t, i)
-                            ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
+                            #ac_targ[i].checkpoint(f"target{fpostfix}", out_dir, t, i)
                 if t >= BATCH_SIZE:
                     for i in range(n_agents):
                         batch = replay_buffer[i].sample(BATCH_SIZE)
@@ -258,7 +278,7 @@ def objective(trial):
                         temp_optimizer[i].zero_grad(set_to_none=True)
                         temp_loss.backward()
                         temp_optimizer[i].step()
-                        temp = log_temp[i].exp()
+                        temp = torch.exp(log_temp[i])
                         q1_pi = ac[i].q1(o, pi)
                         q2_pi = ac[i].q2(o, pi)
                         q_pi = torch.min(q1_pi, q2_pi)
@@ -284,7 +304,7 @@ def objective(trial):
                             q1_pi_targ = ac_targ[i].q1(o2, a2)
                             q2_pi_targ = ac_targ[i].q2(o2, a2)
                             q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-                            backup = r - avg_rew[i] + (q_pi_targ - temp * logp_a2)
+                            backup = (r - profit_mean[i]) + (q_pi_targ - temp * logp_a2)
 
                         # MSE loss against Bellman backup
                         loss_q1 = F.smooth_l1_loss(q1, backup)
@@ -303,6 +323,12 @@ def objective(trial):
                         loss_v = F.smooth_l1_loss(vf, vf_target)
                         loss_v.backward()
                         v_optimizer[i].step()
+
+                        if pi_scheduler[i] is not None: # Which means all else are, too
+                            pi_scheduler[i].step()
+                            v_scheduler[i].step()
+                            q_scheduler[i].step()
+                            temp_scheduler[i].step()
 
                         # Finally, update target networks by polyak averaging.
                         with torch.no_grad():
@@ -324,8 +350,8 @@ def objective(trial):
                         avg_price = np.round(
                             torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3,
                         )
-                        avg_profit = np.round(avg_rew.cpu().detach().numpy(), 3,)
-                        temp = np.round(np.array([a.exp().item() for a in log_temp]), 3,)
+                        avg_profit = np.round(profit_mean.cpu().detach().numpy(), 3,)
+                        temp = np.round(np.array([torch.exp(a).item() for a in log_temp]), 3,)
                     t_tq.set_postfix_str(
                         f"p = {avg_price}, P = {avg_profit}, QL = {q_loss}, PL = {pi_loss}, VL = {v_loss}, temp = {temp}"
                     )
@@ -333,16 +359,13 @@ def objective(trial):
         ir_periods = 20
         nash_price = 1.4729273733327568
         coop_price = 1.9249689958811602
-        STARTING_PROFIT_GAIN=0.8
         def Pi(p):
             q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
             pi = (p - c) * q
             return pi
         with torch.no_grad():
 # Impulse response
-            state = torch.rand(n_agents).to(device) * c + c 
-            for i in range(0, n_agents):
-                state[i] = (coop_price - nash_price) * STARTING_PROFIT_GAIN + nash_price
+            state = price.squeeze().clone().detach()
             print(f"Initial state = {state}")
             price = state.clone()
             initial_state = state.clone()
@@ -382,14 +405,14 @@ def objective(trial):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} OUT_DIR")
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} OUT_DIR NUM_DEVICE")
         exit(1)
     # Add stream handler of stdout to show the messages
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     study_name = sys.argv[1]  # Unique identifier of the study.
     storage_name = "sqlite:///{}.db".format(study_name)
-    study = optuna.create_study(study_name=study_name, storage=storage_name, direction = "minimize")
+    study = optuna.create_study(study_name=study_name, storage=storage_name, direction = "minimize", load_if_exists=True)
     study.optimize(objective, n_trials=10)
 
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
