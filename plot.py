@@ -40,13 +40,12 @@ def main():
     nash = 0.22292696
     coop = 0.33749046
     N_AGENTS = 2
-    STARTING_PROFIT_GAIN = 0.9
-    SEEDS = [250917]
-    T_MAX = [10000, 90000]
+    SEEDS = [250917, 50321]#, 200722]
+    T_MAX = [ 50000, 60000, 70000, 80000, 90000, 100000]
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
     root_dir = sys.argv[1]
 
-    ir_periods = 40
+    ir_periods = 20
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
     ai = 2.0
     a0 = 0
@@ -70,6 +69,9 @@ def main():
         plt.show()
     with torch.no_grad():
         for seed, t_max in itertools.product(SEEDS, T_MAX):
+            print(np.mean(rewards[:,t_max-int(t_max/10):t_max]))
+            start_prof_gains = (np.mean(rewards[:,t_max-int(t_max/10):t_max]) - nash) / (coop - nash)
+            print(f"Profit gains at t = {t_max} = {start_prof_gains}")
             np.random.seed(seed)
             torch.manual_seed(seed)
             actor = [torch.load(f"{out_dir}/actor_weights_{seed}_t{t_max}_agent{i}.pth", map_location=torch.device(device)) for i in range(N_AGENTS)]
@@ -84,52 +86,54 @@ def main():
                     for a_j, p2 in enumerate(w):
                         state = torch.tensor([[p1, p2]])
                         a = scale_price(actor[i](state)[0], c).detach()
-                        print(f"{state} -> {a}")
+                        #print(f"{state} -> {a}")
                         A[i][a_i, a_j] = a
             plot_heatmap(A, f"Actions for seed {seed}")
             print("Computing IRs...")
-            # Impulse response
-            price_history = np.zeros([N_AGENTS, ir_periods])
-            state = torch.rand(N_AGENTS).to(device) * c + c
-            for i in range(0, N_AGENTS):
-                state[i] = (coop_price - nash_price) * STARTING_PROFIT_GAIN + nash_price
-            print(f"Initial state = {state}")
-            price = state.clone()
-            initial_state = state.clone()
-            # First compute non-deviation profits
-            DISCOUNT = 0.99
-            nondev_profit = 0
-            j = 1
-            leg = ["Non-deviating agent"] * N_AGENTS
-            leg[j] = "Deviating agent"
-            for t in range(ir_periods):
+            ir_profit_periods = 1000
+            for j in range(2):
+                # Impulse response
+                price_history = np.zeros([N_AGENTS, ir_profit_periods])
+                state = torch.rand(N_AGENTS).to(device) * c + c
+                for i in range(0, N_AGENTS):
+                    state[i] = (coop_price - nash_price) * start_prof_gains + nash_price
+                print(f"Initial state = {state}")
+                price = state.clone()
+                initial_state = state.clone()
+                # First compute non-deviation profits
+                DISCOUNT = 0.99
+                nondev_profit = 0
+                leg = ["Non-deviating agent"] * N_AGENTS
+                leg[j] = "Deviating agent"
+                for t in range(ir_profit_periods):
+                    for i in range(N_AGENTS):
+                        price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
+                    if t >= (ir_periods / 2):
+                        nondev_profit += Pi(price.numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
+                    price_history[:, t] = price.detach()
+                    state = price
+                # Now compute deviation profits
+                dev_profit = 0
+                state = initial_state.clone()
+                for t in range(ir_profit_periods):
+                    for i in range(N_AGENTS):
+                        price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
+                    if t == (ir_periods / 2):
+                        br = grad_desc(Pi, price.numpy(), j)
+                        price[j] = torch.tensor(br)
+                    if t >= (ir_periods / 2):
+                        dev_profit += Pi(price.numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
+                    price_history[:, t] = price
+                    state = price
+                dev_gain = (dev_profit / nondev_profit - 1) * 100
+                print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%")
                 for i in range(N_AGENTS):
-                    price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
-                if t >= (ir_periods / 2):
-                    nondev_profit += Pi(price.numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
-                price_history[:, t] = price.detach()
-                state = price
-            # Now compute deviation profits
-            dev_profit = 0
-            state = initial_state.clone()
-            for t in range(ir_periods):
+                    plt.scatter(list(range(ir_periods)), price_history[i, :ir_periods])
+                plt.legend(leg)
                 for i in range(N_AGENTS):
-                    price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
-                if t == (ir_periods / 2):
-                    br = grad_desc(Pi, price.numpy(), j)
-                    price[j] = torch.tensor(br)
-                if t >= (ir_periods / 2):
-                    dev_profit += Pi(price.numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
-                price_history[:, t] = price
-                state = price
-            dev_gain = (dev_profit / nondev_profit - 1) * 100
-            print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%")
-            for i in range(N_AGENTS):
-                plt.scatter(list(range(ir_periods)), price_history[i, :])
-            plt.legend(leg)
-            for i in range(N_AGENTS):
-                plt.plot(price_history[i, :])
-            plt.show()
+                    plt.plot(price_history[i, :ir_periods])
+                plt.ylim(1.5, 2)
+                plt.show()
 
 
 if __name__ == "__main__":
