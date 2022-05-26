@@ -48,4 +48,3 @@ def grad_desc(f, x, i, thresh=1e-5, lr=1e-4, maxit=int(1e5)):
         x[i] += lr * df(f, x)[i]
         it += 1
     return x[i]
-

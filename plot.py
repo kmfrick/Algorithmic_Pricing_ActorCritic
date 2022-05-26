@@ -12,8 +12,15 @@ import torch
 
 from cycler import cycler
 
-from main import SquashedGaussianMLPActor, MLPQFunction, MLPValueFunction, MLPActorCritic, scale_price
+from main import (
+    SquashedGaussianMLPActor,
+    MLPQFunction,
+    MLPValueFunction,
+    MLPActorCritic,
+    scale_price,
+)
 from utils import df, grad_desc
+
 
 def plot_heatmap(arr, title, c=1, w=100):
     plt.tight_layout()
@@ -33,15 +40,14 @@ def plot_heatmap(arr, title, c=1, w=100):
     plt.show()
 
 
-
 def main():
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
     nash = 0.22292696
     coop = 0.33749046
     N_AGENTS = 2
-    SEEDS = [250917, 50321]#, 200722]
-    T_MAX = [ 50000, 60000, 70000, 80000, 90000, 100000]
+    SEEDS = [250917, 50321]  # , 200722]
+    T_MAX = [50000, 60000, 70000, 80000, 90000, 100000]
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
     root_dir = sys.argv[1]
 
@@ -61,20 +67,33 @@ def main():
         out_dir = f"{root_dir}"
         rewards = np.load(f"{out_dir}/session_reward_{seed}.npy")
         for i in range(N_AGENTS):
-            r_series = pd.Series(rewards[i, :]).ewm(span=np.max(T_MAX)//50)
+            r_series = pd.Series(rewards[i, :]).ewm(span=np.max(T_MAX) // 50)
             plt.plot(r_series.mean())
-            plt.fill_between(range(len(r_series.mean())), r_series.mean() - r_series.std(), r_series.mean() + r_series.std(), alpha=0.2)
+            plt.fill_between(
+                range(len(r_series.mean())),
+                r_series.mean() - r_series.std(),
+                r_series.mean() + r_series.std(),
+                alpha=0.2,
+            )
         plt.axhline(nash)
         plt.axhline(coop)
         plt.show()
     with torch.no_grad():
         for seed, t_max in itertools.product(SEEDS, T_MAX):
-            print(np.mean(rewards[:,t_max-int(t_max/10):t_max]))
-            start_prof_gains = (np.mean(rewards[:,t_max-int(t_max/10):t_max]) - nash) / (coop - nash)
+            print(np.mean(rewards[:, t_max - int(t_max / 10) : t_max]))
+            start_prof_gains = (np.mean(rewards[:, t_max - int(t_max / 10) : t_max]) - nash) / (
+                coop - nash
+            )
             print(f"Profit gains at t = {t_max} = {start_prof_gains}")
             np.random.seed(seed)
             torch.manual_seed(seed)
-            actor = [torch.load(f"{out_dir}/actor_weights_{seed}_t{t_max}_agent{i}.pth", map_location=torch.device(device)) for i in range(N_AGENTS)]
+            actor = [
+                torch.load(
+                    f"{out_dir}/actor_weights_{seed}_t{t_max}_agent{i}.pth",
+                    map_location=torch.device(device),
+                )
+                for i in range(N_AGENTS)
+            ]
             print(actor)
             # Create and plot state-action map
             grid_size = 100
@@ -86,7 +105,7 @@ def main():
                     for a_j, p2 in enumerate(w):
                         state = torch.tensor([[p1, p2]])
                         a = scale_price(actor[i](state)[0], c).detach()
-                        #print(f"{state} -> {a}")
+                        # print(f"{state} -> {a}")
                         A[i][a_i, a_j] = a
             plot_heatmap(A, f"Actions for seed {seed}")
             print("Computing IRs...")
@@ -126,7 +145,9 @@ def main():
                     price_history[:, t] = price
                     state = price
                 dev_gain = (dev_profit / nondev_profit - 1) * 100
-                print(f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%")
+                print(
+                    f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%"
+                )
                 for i in range(N_AGENTS):
                     plt.scatter(list(range(ir_periods)), price_history[i, :ir_periods])
                 plt.legend(leg)
