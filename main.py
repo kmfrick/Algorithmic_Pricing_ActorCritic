@@ -115,7 +115,6 @@ class MLPActorCritic(nn.Module):
         self.pi = SquashedGaussianMLPActor(obs_dim, act_dim, hidden_sizes, activation).to(device)
         self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(device)
         self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(device)
-        self.v = MLPValueFunction(obs_dim, hidden_sizes, activation).to(device)
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():
@@ -172,7 +171,8 @@ def objective(trial):
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
     SEEDS = [250917, 50321, 200722]
-
+    min_price = nash_price - 0.1
+    max_price = coop_price + 0.08
     avg_dev_gain = 0
     for session in range(len(SEEDS)):
         fpostfix = SEEDS[session]
@@ -187,7 +187,6 @@ def objective(trial):
         replay_buffer = []
         pi_optimizer = []
         q_optimizer = []
-        v_optimizer = []
         temp_optimizer = []
         log_temp = []
         for i in range(n_agents):
@@ -208,16 +207,13 @@ def objective(trial):
             )
             log_temp.append(torch.zeros(1, requires_grad=True, device=device))
             pi_optimizer.append(
-                torch.optim.Adam(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR)
+                torch.optim.AdamW(ac[i].pi.parameters(), lr=INITIAL_LR_ACTOR, weight_decay=1e-3)
             )
             q_optimizer.append(
-                torch.optim.Adam(q_params[i], lr=INITIAL_LR_CRITIC)
-            )
-            v_optimizer.append(
-                torch.optim.Adam(ac[i].v.parameters(), lr=INITIAL_LR_CRITIC)
+                torch.optim.AdamW(q_params[i], lr=INITIAL_LR_CRITIC, weight_decay=1e-3)
             )
             temp_optimizer.append(
-                torch.optim.Adam([log_temp[i]], lr=INITIAL_LR_TEMP)
+                torch.optim.AdamW([log_temp[i]], lr=INITIAL_LR_TEMP, weight_decay=1e-3)
             )
         # Create targt network
         ac_targ = copy.deepcopy(ac)
@@ -232,7 +228,6 @@ def objective(trial):
         price_history = torch.zeros([n_agents, MAX_T])
         q_loss = np.zeros([n_agents])
         pi_loss = np.zeros([n_agents])
-        v_loss = np.zeros([n_agents])
         with tqdm(range(MAX_T)) as t_tq:
             for t in t_tq:
                 with torch.no_grad():
@@ -301,9 +296,13 @@ def objective(trial):
 
                         # Bellman backup for Q functions
                         with torch.no_grad():
-                            # Target values
-                            v_pi_targ = ac_targ[i].v(o2)
-                            backup = (r - profit_mean[i]) + v_pi_targ
+                            # Target actions from current policy
+                            a2, logp_a2 = ac[i].pi(o2)
+                            # Target Q-values
+                            q1_pi_targ = ac_targ[i].q1(o2, a2)
+                            q2_pi_targ = ac_targ[i].q2(o2, a2)
+                            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+                            backup = (r - profit_mean[i]) + q_pi_targ - temp * logp_a2
 
                         # MSE loss against Bellman backup
                         loss_q1 = F.mse_loss(q1, backup)
@@ -314,23 +313,18 @@ def objective(trial):
                         loss_q.backward()
                         q_optimizer[i].step()
 
-                        # Value function loss
-                        vf = ac[i].v(o)
-                        with torch.no_grad():
-                            vf_target = q_pi - temp * logp_pi
-                        loss_v = F.mse_loss(vf, vf_target)
-
-                        v_optimizer[i].zero_grad(set_to_none=True)
-                        loss_v.backward()
-                        v_optimizer[i].step()
-                        
                         # Update average reward
                         with torch.no_grad():
-                            v_cur_targ = ac_targ[i].v(state)
-                            v_next_targ = ac_targ[i].v(price)
+                            q1_cur_targ = ac_targ[i].q1(state.squeeze(), action[i].unsqueeze(0))
+                            q2_cur_targ = ac_targ[i].q2(state.squeeze(), action[i].unsqueeze(0))
+                            q_cur_targ = torch.min(q1_cur_targ, q2_cur_targ)
                             # CRUCIAL and easy to overlook step: state = price
                             state = price.unsqueeze(0)
-                            profit_mean[i] += AVG_REW_LR * (profits[i] - profit_mean[i] + v_next_targ - v_cur_targ).squeeze()
+                            action_next, _ = ac[i].pi(state)
+                            q1_next_targ = ac_targ[i].q1(state, action_next)
+                            q2_next_targ = ac_targ[i].q2(state, action_next)
+                            q_next_targ = torch.min(q1_next_targ, q2_next_targ)
+                            profit_mean[i] += AVG_REW_LR * (profits[i] - profit_mean[i] + q_next_targ - q_cur_targ).squeeze()
 
                         # Finally, update target networks by polyak averaging.
                         with torch.no_grad():
@@ -339,14 +333,12 @@ def objective(trial):
                                 # params, as opposed to "mul" and "add", which would make new tensors.
                                 p_targ.data.mul_(TARG_UPDATE_RATE)
                                 p_targ.data.add_((1 - TARG_UPDATE_RATE) * p.data)
-                        q_loss[i], pi_loss[i], v_loss[i] = (
+                        q_loss[i], pi_loss[i] = (
                             loss_q.item(),
                             loss_pi.item(),
-                            loss_v.item()
                         )
                     q_loss = np.round(q_loss, 3)
                     pi_loss = np.round(pi_loss, 3)
-                    v_loss = np.round(v_loss, 3)
                     with torch.no_grad():
                         start_t = t - BATCH_SIZE
                         avg_price = np.round(
@@ -355,9 +347,8 @@ def objective(trial):
                         avg_profit = np.round(profit_mean.cpu().detach().numpy(), 3,)
                         temp = np.round(np.array([torch.exp(a).item() for a in log_temp]), 3,)
                     bkp = backup.mean().item()
-                    vpt = v_pi_targ.mean().item()
                     t_tq.set_postfix_str(
-                        f"p = {avg_price}, P = {avg_profit}, QL = {q_loss.mean().item():.3f} PL = {pi_loss.mean().item():.3f}, VL = {v_loss.mean().item():.3f} te = {temp.mean().item():.3f} bkp = {bkp:.3f}, vpt = {vpt:.3f}"
+                        f"p = {avg_price}, P = {avg_profit}, QL = {q_loss.mean().item():.3f} PL = {pi_loss.mean().item():.3f}, te = {temp.mean().item():.3f}, bkp = {bkp:.3f}"
                     )
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", total_reward.detach())
         ir_periods = 20
