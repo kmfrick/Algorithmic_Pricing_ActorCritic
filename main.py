@@ -257,6 +257,12 @@ def objective(trial):
     AVG_REW_LR = 0.03
     TARGET_ENTROPY = -1
     BUF_SIZE = 7000
+    IR_PERIODS = 20
+
+    def Pi(p):
+        q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
+        pi = (p - c) * q
+        return pi
     print(trial.params)
     MAX_T = int(1e5)
     CKPT_T = int(1e4)
@@ -325,8 +331,10 @@ def objective(trial):
                             rew=profits[i].cpu(),
                             obs2=price.cpu(),
                         )
-                        if t > MAX_T / 2 and t % CKPT_T == 0:
+                        if t % CKPT_T == 0:
                             agents[i].checkpoint(fpostfix, out_dir, t, i)
+                    if t % CKPT_T == 0:
+                        impulse_response(n_agents, agents, price, IR_PERIODS, c, Pi)
                 if t >= BATCH_SIZE:
                     for i in range(n_agents):
                         q_loss[i], pi_loss[i], temp[i], backup[i] = agents[i].learn(state, action[i], profits[i], price.unsqueeze(0))
@@ -346,15 +354,11 @@ def objective(trial):
                     t_tq.set_postfix_str(
                         f"p = {avg_price}, P = {avg_profit}, QL = {ql}, PL = {pl}, temp = {te}, backup = {bkp}"
                     )
+                # CRUCIAL and easy to overlook: state = price
+                state = price.unsqueeze(0)
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", profit_history.detach())
-        ir_periods = 20
 
-        def Pi(p):
-            q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
-            pi = (p - c) * q
-            return pi
-
-        avg_dev_gain += impulse_response(n_agents, agents, price, ir_periods, c, Pi)
+        avg_dev_gain += impulse_response(n_agents, agents, price, IR_PERIODS, c, Pi)
         for i in range(n_agents):
             agents[i].checkpoint(fpostfix, out_dir, MAX_T, i)
     return avg_dev_gain / len(SEEDS)
