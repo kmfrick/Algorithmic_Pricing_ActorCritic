@@ -123,7 +123,7 @@ def compute_profit(ai, a0, mu, c, p):
     return pi
 
 class Agent():
-    def __init__(self, n_agents, hidden_sizes, buf_size, lr_actor, lr_critic, lr_temp, lr_rew, ur_targ, batch_size, target_entropy):
+    def __init__(self, n_agents, hidden_sizes, buf_size, lr_actor, lr_critic, lr_rew, ur_targ, batch_size, target_entropy):
         self.device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
         self.ac = MLPActorCritic(n_agents, 1, device = self.device, hidden_sizes=hidden_sizes)
         self.q_params = itertools.chain(self.ac.q1.parameters(), self.ac.q2.parameters())
@@ -139,7 +139,7 @@ class Agent():
         self.log_temp = torch.zeros(1, requires_grad=True, device=self.device)
         self.pi_optimizer = torch.optim.AdamW(self.ac.pi.parameters(), lr=lr_actor, weight_decay=1e-3)
         self.q_optimizer = torch.optim.AdamW(self.q_params, lr=lr_critic, weight_decay=1e-3)
-        self.temp_optimizer = torch.optim.AdamW([self.log_temp], lr=lr_temp, weight_decay=1e-3)
+        self.temp_optimizer = torch.optim.Adam([self.log_temp], lr=lr_actor, weight_decay = 0) # Doesn't make sense to use weight decay on the temperature
         self.ac_targ = copy.deepcopy(self.ac)
         # Freeze target network weights
         for p in self.ac_targ.parameters():
@@ -247,16 +247,20 @@ def objective(trial):
     a0 = 0
     mu = 0.25
     c = 1
-    BATCH_SIZE = 32
+    MAX_T = int(1e5)
+    CKPT_T = int(1e4)
+    TARG_UPDATE_RATE = 0.999
     HIDDEN_SIZE = 2048
     MIN_LR = 3e-5
     MAX_LR = 3e-3
     INITIAL_LR_ACTOR = trial.suggest_loguniform("actor_lr", MIN_LR, MAX_LR)
     INITIAL_LR_CRITIC = trial.suggest_loguniform("critic_lr", MIN_LR, MAX_LR)
-    INITIAL_LR_TEMP = trial.suggest_loguniform("temp_lr", MIN_LR, MAX_LR)
     AVG_REW_LR = 0.03
     TARGET_ENTROPY = -1
-    BUF_SIZE = 7000
+    MIN_BUF_SIZE = 5
+    MAX_BUF_SIZE = MAX_T / 1000
+    BUF_SIZE = trial.suggest_int("buf_size", MIN_BUF_SIZE, MAX_BUF_SIZE, log=True) * 1000
+    BATCH_SIZE = 512
     IR_PERIODS = 20
 
     def Pi(p):
@@ -264,10 +268,7 @@ def objective(trial):
         pi = (p - c) * q
         return pi
     print(trial.params)
-    MAX_T = int(1e5)
-    CKPT_T = int(1e4)
-    TARG_UPDATE_RATE = 0.999
-    out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}"
+    out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}_buf{BUF_SIZE}"
     os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
     device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
@@ -304,7 +305,6 @@ def objective(trial):
                     BUF_SIZE,
                     INITIAL_LR_ACTOR,
                     INITIAL_LR_CRITIC,
-                    INITIAL_LR_TEMP,
                     AVG_REW_LR,
                     TARG_UPDATE_RATE,
                     BATCH_SIZE,
@@ -331,9 +331,9 @@ def objective(trial):
                             rew=profits[i].cpu(),
                             obs2=price.cpu(),
                         )
-                        if t % CKPT_T == 0:
+                        if t > MAX_T / 3 and t % CKPT_T == 0:
                             agents[i].checkpoint(fpostfix, out_dir, t, i)
-                    if t % CKPT_T == 0:
+                    if t > 0 and  t % CKPT_T == 0:
                         impulse_response(n_agents, agents, price, IR_PERIODS, c, Pi)
                 if t >= BATCH_SIZE:
                     for i in range(n_agents):
