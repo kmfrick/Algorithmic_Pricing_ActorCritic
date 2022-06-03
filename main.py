@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from cpprb import ReplayBuffer
 
-from utils import impulse_response, scale_price
+from utils import impulse_response, scale_price, TanhNormal
 
 import logging
 import optuna
@@ -56,29 +56,21 @@ class SquashedGaussianMLPActor(nn.Module):
         log_std = self.log_std_layer(net_out)
         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         std = torch.exp(log_std)
+        dist = TanhNormal(mu, std)
 
         # Pre-squash distribution and sample
         if deterministic:
             # Only used for evaluating policy at test time.
-            pi_action = mu
+            u, a = None, mu
         else:
-            pi_action = random.gauss(0, 1) * std + mu
+            u, a = dist.rsample_with_pre_tanh_value()
 
         if with_logprob:
-            # Compute logprob from Gaussian, and then apply correction for sigmoid squashing.
-            # This formula is computed with the same procedure as the original SAC paper (arXiv 1801.01290)
-            # in appendix C, but using the derivative of the sigmoid instead of tanh
-            # It is more numerically stable than using the sigmoid derivative expressed as s(x) * (1 - s(x))
-            # This can be tested by computing it for torch.linspace(-20, 20, 1000) for example
-            var = std ** 2
-            logp_pi = -(((pi_action - mu) ** 2) / (2 * var) - log_std - self.lz).sum(axis=-1)
-            logp_pi += (2 * F.softplus(-pi_action) + pi_action).sum(dim=1)
+            logp_pi = dist.log_prob(value=a, pre_tanh_value=u)
         else:
             logp_pi = None
 
-        pi_action = torch.sigmoid(pi_action)
-
-        return pi_action, logp_pi
+        return a, logp_pi
 
 
 def softabs(x):
