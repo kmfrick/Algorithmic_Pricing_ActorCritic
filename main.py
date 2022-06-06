@@ -1,3 +1,4 @@
+import argparse
 import copy
 import os
 import sys
@@ -20,17 +21,7 @@ from utils import impulse_response, scale_price, TanhNormal
 import logging
 import optuna
 from optuna.trial import TrialState
-
-
-def init_weights(m):
-    if isinstance(m, nn.Linear):
-        torch.nn.init.kaiming_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
-
-
-LOG_STD_MAX = 2
-LOG_STD_MIN = -20
-
+from numba import jit
 
 # Soft Actor-Critic from OpenAI https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
 class SquashedGaussianMLPActor(nn.Module):
@@ -40,17 +31,14 @@ class SquashedGaussianMLPActor(nn.Module):
         fc2 = nn.Linear(hidden_size, hidden_size)
         self.net = nn.Sequential(fc1, activation(), fc2, activation())
         self.mu = nn.Linear(hidden_size, 1)
-        self.log_std = nn.Linear(hidden_size, 1)
-        self.net.apply(init_weights)
-        self.mu.apply(init_weights)
-        self.log_std.apply(init_weights)
+        self.std = nn.Linear(hidden_size, 1)
 
     def forward(self, obs, deterministic=False, with_logprob=True):
         x = self.net(obs)
         mu = self.mu(x)
-        log_std = self.log_std(x)
-        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        std = torch.exp(log_std)
+        std = self.std(x)
+        mu = F.softplus(std)
+        std = F.softplus(std)
         dist = TanhNormal(mu, std)
 
         # Pre-squash distribution and sample
@@ -67,11 +55,6 @@ class SquashedGaussianMLPActor(nn.Module):
 
         return a, logp_pi
 
-
-def softabs(x):
-    return torch.where(torch.abs(x) < 1, 0.5 * x ** 2, -0.5 + torch.abs(x))
-
-
 class MLPQFunction(nn.Module):
     def __init__(self, obs_dim, hidden_size, activation):
         super().__init__()
@@ -79,22 +62,21 @@ class MLPQFunction(nn.Module):
         fc2 = nn.Linear(hidden_size, hidden_size)
         out = nn.Linear(hidden_size, 1)
         self.net = nn.Sequential(fc1, activation(), fc2, activation(), out)
-        self.net.apply(init_weights)
 
     def forward(self, obs, act):
         q = self.net(torch.cat([obs, act], dim=-1))
-        # q = softabs(q)
+        q = F.softplus(q)
         return torch.squeeze(q, -1)  # Critical to ensure q has the right shape
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim, hidden_size, device, activation=nn.ReLU):
+    def __init__(self, obs_dim, pi_hidden_size, q_hidden_size, device, activation):
         super().__init__()
 
         # build policy and value functions
-        self.pi = SquashedGaussianMLPActor(obs_dim, hidden_size, activation).to(device)
-        self.q1 = MLPQFunction(obs_dim, hidden_size, activation).to(device)
-        self.q2 = MLPQFunction(obs_dim, hidden_size, activation).to(device)
+        self.pi = SquashedGaussianMLPActor(obs_dim, pi_hidden_size, activation).to(device)
+        self.q1 = MLPQFunction(obs_dim, q_hidden_size, activation).to(device)
+        self.q2 = MLPQFunction(obs_dim, q_hidden_size, activation).to(device)
 
 
 def compute_profit(ai, a0, mu, c, p):
@@ -118,7 +100,7 @@ class Agent:
         clip_norm=0.05,
     ):
         self.device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
-        self.ac = MLPActorCritic(n_agents, device=self.device, hidden_size=hidden_size)
+        self.ac = MLPActorCritic(n_agents, device=self.device, pi_hidden_size=(hidden_size // 8), q_hidden_size = hidden_size, activation = nn.Tanh)
         self.q_params = itertools.chain(self.ac.q1.parameters(), self.ac.q2.parameters())
         self.replay_buffer = ReplayBuffer(
             buf_size,
@@ -166,9 +148,8 @@ class Agent:
                 self.lr_rew * (profit - self.profit_mean + q_next_targ - q_cur_targ).squeeze()
             )
 
-    def learn(self, state, action, profit, next_state):
-        batch = self.replay_buffer.sample(self.batch_size)
-
+    def learn(self):
+        batch = self.replay_buffer.sample(min(self.batch_size, self.replay_buffer.get_next_index()))
         o, a, r, o2 = (
             torch.tensor(batch["obs"], device=self.device).squeeze(),
             torch.tensor(batch["act"], device=self.device),
@@ -250,9 +231,11 @@ class Agent:
     def checkpoint(self, fpostfix, out_dir, t, i):
         torch.save(self.ac.pi, f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
 
-
-def objective(trial):
-    torch.cuda.set_device(int(sys.argv[2]))
+def main():
+    parser.add_argument("--out_dir", type=str, help="Directory")
+    parser.add_argument("--device", type=int, help="CUDA device")
+    args = parser.parse_args()
+    torch.cuda.set_device(args.device)
     n_agents = 2
     ai = 2
     a0 = 0
@@ -264,20 +247,15 @@ def objective(trial):
     HIDDEN_SIZE = 2048
     MIN_LR = 3e-5
     MAX_LR = 3e-3
-    INITIAL_LR_ACTOR = trial.suggest_loguniform("actor_lr", MIN_LR, MAX_LR)
-    INITIAL_LR_CRITIC = trial.suggest_loguniform("critic_lr", MIN_LR, MAX_LR)
+    INITIAL_LR_ACTOR = 3e-4
+    INITIAL_LR_CRITIC = 3e-4
     AVG_REW_LR = 0.03
     TARGET_ENTROPY = -1
     MIN_BUF_SIZE = 5
     MAX_BUF_SIZE = 100
-    BUF_SIZE = trial.suggest_int("buf_size", MIN_BUF_SIZE, MAX_BUF_SIZE, log=True) * 1000
+    BUF_SIZE = 20000
     BATCH_SIZE = 512
     IR_PERIODS = 20
-
-    def Pi(p):
-        q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
-        pi = (p - c) * q
-        return pi
 
     print(trial.params)
     out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}_buf{BUF_SIZE}"
@@ -290,14 +268,14 @@ def objective(trial):
     SEEDS = [250917, 50321, 200722]
     min_price = nash_price - 0.1
     max_price = coop_price + 0.1
-    avg_dev_gain = 0
+    avg_pg = 0
     for session in range(len(SEEDS)):
         fpostfix = SEEDS[session]
         # Random seeds
         np.random.seed(SEEDS[session])
         torch.manual_seed(SEEDS[session])
         # Initial state is random
-        state = scale_price(torch.rand(n_agents) * 2 - 1, min_price, max_price).to(device)
+        state = scale_price(torch.tanh(torch.randn([2])), min_price, max_price).to(device)
         state = state.unsqueeze(0)
         action = torch.zeros([n_agents]).to(device)
         price = torch.zeros([n_agents]).to(device)
@@ -324,98 +302,61 @@ def objective(trial):
                     TARGET_ENTROPY,
                 )
             )
-        with tqdm(range(MAX_T + 1)) as t_tq:
-            for t in t_tq:
-                with torch.no_grad():
-                    for i in range(n_agents):
-                        if t < BATCH_SIZE:
-                            action[i] = torch.rand(1) * 2 - 1  # Randomly explore at the beginning
-                        else:
-                            action[i] = agents[i].act(state).squeeze()
-                        price[i] = scale_price(action[i], min_price, max_price)
-                        price_history[i, t] = price[i]
-                    profits = compute_profit(ai, a0, mu, c, price)
-                    profit_history[:, t] = profits
-                    for i in range(n_agents):
-                        agents[i].replay_buffer.add(
-                            obs=state.cpu(),
-                            act=action[i].cpu(),
-                            rew=profits[i].cpu(),
-                            obs2=price.cpu(),
-                        )
-                        if t > MAX_T / 3 and t % CKPT_T == 0:
-                            agents[i].checkpoint(fpostfix, out_dir, t, i)
-                if t >= BATCH_SIZE:
-                    for i in range(n_agents):
-                        q_loss[i], pi_loss[i], temp[i], backup[i], grad_norm[i] = agents[i].learn(
-                            state, action[i], profits[i], price.unsqueeze(0)
-                        )
-                    with torch.no_grad():
-                        start_t = t - BATCH_SIZE
-                        avg_price = np.round(
-                            torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                        )
-                        std_price = np.round(
-                            torch.std(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                        )
-                        avg_profit = np.round(
-                            torch.mean(profit_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                        )
-                        ql = np.round(q_loss, 3)
-                        pl = np.round(pi_loss, 3)
-                        te = np.round(temp, 3)
-                        bkp = np.round(backup, 3)
-                        gn = np.round(grad_norm, 3)
-                    t_tq.set_postfix_str(
-                        f"p = {avg_price}, std = {std_price}, P = {avg_profit}, QL = {ql}, PL = {pl}, temp = {te}, backup = {bkp}, GN = {gn}"
-                    )
+        t_tq = tqdm(range(MAX_T + 1))
+        for t in t_tq:
+            with torch.no_grad():
                 for i in range(n_agents):
-                    agents[i].update_avg_reward(state, action[i], profits[i], price.unsqueeze(0))
-                # CRUCIAL and easy to overlook: state = price
-                state = price.unsqueeze(0)
+                    if t < BATCH_SIZE:
+                        action[i] = torch.tanh(torch.randn([1]))  # Randomly explore at the beginning
+                    else:
+                        action[i] = agents[i].act(state).squeeze()
+                    price[i] = scale_price(action[i], min_price, max_price)
+                    price_history[i, t] = price[i]
+                profits = compute_profit(ai, a0, mu, c, price)
+                profit_history[:, t] = profits
+                for i in range(n_agents):
+                    agents[i].replay_buffer.add(
+                        obs=state.cpu(),
+                        act=action[i].cpu(),
+                        rew=profits[i].cpu(),
+                        obs2=price.cpu(),
+                    )
+                    if t > MAX_T / 3 and t % CKPT_T == 0:
+                        agents[i].checkpoint(fpostfix, out_dir, t, i)
+            if t > 1:
+                for i in range(n_agents):
+                    q_loss[i], pi_loss[i], temp[i], backup[i], grad_norm[i] = agents[i].learn()
+                with torch.no_grad():
+                    start_t = max(t - BATCH_SIZE, 0)
+                    avg_price = np.round(
+                        torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
+                    )
+                    std_price = np.round(
+                        torch.std(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
+                    )
+                    avg_profit = np.round(
+                        torch.mean(profit_history[:, start_t:t], dim=1).cpu().numpy(), 3
+                    )
+                ql = np.round(q_loss, 3)
+                pl = np.round(pi_loss, 3)
+                te = np.round(temp, 3)
+                bkp = np.round(backup, 3)
+                gn = np.round(grad_norm, 3)
+                t_tq.set_postfix_str(
+                    f"p = {avg_price}, std = {std_price}, P = {avg_profit}, QL = {ql}, PL = {pl}, temp = {te}, backup = {bkp}, GN = {gn}"
+                )
+            for i in range(n_agents):
+                agents[i].update_avg_reward(state, action[i], profits[i], price.unsqueeze(0))
+            # CRUCIAL and easy to overlook: state = price
+            state = price.unsqueeze(0)
         start_t = t - BATCH_SIZE
         profit_gain = (
             torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy() - nash_price
         ) / (coop_price - nash_price)
+        avg_pg += profit_gain
         print("PG = {profit_gain}")
-        avg_dev_gain += impulse_response(
-            n_agents, agents, ir_price, IR_PERIODS, c, Pi, max_price=max_price
-        )
         np.save(f"{out_dir}/session_prices_{fpostfix}.npy", price_history.detach())
-    return avg_dev_gain / len(SEEDS)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Run a hyperparameter study")
-    parser.add_argument("--study_name", type=str, help="Directory")
-    parser.add_argument("--device", type=int, help="CUDA device")
-    args = parser.parse_args()
-    # Add stream handler of stdout to show the messages
-    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
-    study_name = args.study_name  # Unique identifier of the study.
-    storage_name = "sqlite:///{}.db".format(study_name)
-    study = optuna.create_study(
-        study_name=study_name, storage=storage_name, direction="minimize", load_if_exists=True
-    )
-    study.optimize(objective, n_trials=10)
-
-    pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
-    complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
-
-    print("Study statistics: ")
-    print("  Number of finished trials: ", len(study.trials))
-    print("  Number of pruned trials: ", len(pruned_trials))
-    print("  Number of complete trials: ", len(complete_trials))
-
-    print("Best trial:")
-    trial = study.best_trial
-
-    print("  Value: ", trial.value)
-
-    print("  Params: ")
-    for key, value in trial.params.items():
-        print("    {}: {}".format(key, value))
-
+    return avg_pg / len(SEEDS)
 
 if __name__ == "__main__":
     main()
