@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from cpprb import ReplayBuffer
 
-from utils import impulse_response, scale_price
+from utils import impulse_response, scale_price, TanhNormal
 
 import logging
 import optuna
@@ -56,29 +56,21 @@ class SquashedGaussianMLPActor(nn.Module):
         log_std = self.log_std_layer(net_out)
         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         std = torch.exp(log_std)
+        dist = TanhNormal(mu, std)
 
         # Pre-squash distribution and sample
         if deterministic:
             # Only used for evaluating policy at test time.
-            pi_action = mu
+            u, a = None, mu
         else:
-            pi_action = random.gauss(0, 1) * std + mu
+            u, a = dist.rsample_with_pre_tanh_value()
 
         if with_logprob:
-            # Compute logprob from Gaussian, and then apply correction for sigmoid squashing.
-            # This formula is computed with the same procedure as the original SAC paper (arXiv 1801.01290)
-            # in appendix C, but using the derivative of the sigmoid instead of tanh
-            # It is more numerically stable than using the sigmoid derivative expressed as s(x) * (1 - s(x))
-            # This can be tested by computing it for torch.linspace(-20, 20, 1000) for example
-            var = std ** 2
-            logp_pi = -(((pi_action - mu) ** 2) / (2 * var) - log_std - self.lz).sum(axis=-1)
-            logp_pi += (2 * F.softplus(-pi_action) + pi_action).sum(dim=1)
+            logp_pi = dist.log_prob(value=a, pre_tanh_value=u)
         else:
             logp_pi = None
 
-        pi_action = torch.sigmoid(pi_action)
-
-        return pi_action, logp_pi
+        return a, logp_pi
 
 
 def softabs(x):
@@ -123,7 +115,7 @@ def compute_profit(ai, a0, mu, c, p):
     return pi
 
 class Agent():
-    def __init__(self, n_agents, hidden_sizes, buf_size, lr_actor, lr_critic, lr_temp, lr_rew, ur_targ, batch_size, target_entropy):
+    def __init__(self, n_agents, hidden_sizes, buf_size, lr_actor, lr_critic, lr_rew, ur_targ, batch_size, target_entropy):
         self.device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
         self.ac = MLPActorCritic(n_agents, 1, device = self.device, hidden_sizes=hidden_sizes)
         self.q_params = itertools.chain(self.ac.q1.parameters(), self.ac.q2.parameters())
@@ -139,7 +131,7 @@ class Agent():
         self.log_temp = torch.zeros(1, requires_grad=True, device=self.device)
         self.pi_optimizer = torch.optim.AdamW(self.ac.pi.parameters(), lr=lr_actor, weight_decay=1e-3)
         self.q_optimizer = torch.optim.AdamW(self.q_params, lr=lr_critic, weight_decay=1e-3)
-        self.temp_optimizer = torch.optim.AdamW([self.log_temp], lr=lr_temp, weight_decay=1e-3)
+        self.temp_optimizer = torch.optim.Adam([self.log_temp], lr=lr_actor, weight_decay = 0) # Doesn't make sense to use weight decay on the temperature
         self.ac_targ = copy.deepcopy(self.ac)
         # Freeze target network weights
         for p in self.ac_targ.parameters():
@@ -247,21 +239,28 @@ def objective(trial):
     a0 = 0
     mu = 0.25
     c = 1
-    BATCH_SIZE = 32
+    MAX_T = int(1e5)
+    CKPT_T = int(1e4)
+    TARG_UPDATE_RATE = 0.999
     HIDDEN_SIZE = 2048
     MIN_LR = 3e-5
     MAX_LR = 3e-3
     INITIAL_LR_ACTOR = trial.suggest_loguniform("actor_lr", MIN_LR, MAX_LR)
     INITIAL_LR_CRITIC = trial.suggest_loguniform("critic_lr", MIN_LR, MAX_LR)
-    INITIAL_LR_TEMP = trial.suggest_loguniform("temp_lr", MIN_LR, MAX_LR)
     AVG_REW_LR = 0.03
     TARGET_ENTROPY = -1
-    BUF_SIZE = 7000
+    MIN_BUF_SIZE = 5
+    MAX_BUF_SIZE = MAX_T / 1000
+    BUF_SIZE = trial.suggest_int("buf_size", MIN_BUF_SIZE, MAX_BUF_SIZE, log=True) * 1000
+    BATCH_SIZE = 512
+    IR_PERIODS = 20
+
+    def Pi(p):
+        q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
+        pi = (p - c) * q
+        return pi
     print(trial.params)
-    MAX_T = int(1e5)
-    CKPT_T = int(1e4)
-    TARG_UPDATE_RATE = 0.999
-    out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}-{INITIAL_LR_TEMP}"
+    out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}_buf{BUF_SIZE}"
     os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
     device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
@@ -298,7 +297,6 @@ def objective(trial):
                     BUF_SIZE,
                     INITIAL_LR_ACTOR,
                     INITIAL_LR_CRITIC,
-                    INITIAL_LR_TEMP,
                     AVG_REW_LR,
                     TARG_UPDATE_RATE,
                     BATCH_SIZE,
@@ -325,8 +323,10 @@ def objective(trial):
                             rew=profits[i].cpu(),
                             obs2=price.cpu(),
                         )
-                        if t > MAX_T / 2 and t % CKPT_T == 0:
+                        if t > MAX_T / 3 and t % CKPT_T == 0:
                             agents[i].checkpoint(fpostfix, out_dir, t, i)
+                    if t > 0 and  t % CKPT_T == 0:
+                        impulse_response(n_agents, agents, price, IR_PERIODS, c, Pi)
                 if t >= BATCH_SIZE:
                     for i in range(n_agents):
                         q_loss[i], pi_loss[i], temp[i], backup[i] = agents[i].learn(state, action[i], profits[i], price.unsqueeze(0))
@@ -346,15 +346,11 @@ def objective(trial):
                     t_tq.set_postfix_str(
                         f"p = {avg_price}, P = {avg_profit}, QL = {ql}, PL = {pl}, temp = {te}, backup = {bkp}"
                     )
+                # CRUCIAL and easy to overlook: state = price
+                state = price.unsqueeze(0)
         np.save(f"{out_dir}/session_reward_{fpostfix}.npy", profit_history.detach())
-        ir_periods = 20
 
-        def Pi(p):
-            q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
-            pi = (p - c) * q
-            return pi
-
-        avg_dev_gain += impulse_response(n_agents, agents, price, ir_periods, c, Pi)
+        avg_dev_gain += impulse_response(n_agents, agents, price, IR_PERIODS, c, Pi)
         for i in range(n_agents):
             agents[i].checkpoint(fpostfix, out_dir, MAX_T, i)
     return avg_dev_gain / len(SEEDS)
