@@ -44,7 +44,7 @@ class SquashedGaussianMLPActor(nn.Module):
         # Pre-squash distribution and sample
         if deterministic:
             # Only used for evaluating policy at test time.
-            u, a = None, mu
+            u, a = None, torch.tanh(mu)
         else:
             u, a = dist.rsample_with_pre_tanh_value()
 
