@@ -64,7 +64,7 @@ def scale_price_sigmoid(price, c, d=None):
 
 def scale_price(price, c, d=None):
     s = (price + 1) / 2
-    return scale_price_sigmoid(price, c, d)
+    return scale_price_sigmoid(s, c, d)
 
 
 def impulse_response(n_agents, agents, price, ir_periods, c, Pi):
