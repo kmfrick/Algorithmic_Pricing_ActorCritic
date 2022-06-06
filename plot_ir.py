@@ -16,7 +16,6 @@ from cycler import cycler
 from main import (
     SquashedGaussianMLPActor,
     MLPQFunction,
-    MLPValueFunction,
     MLPActorCritic,
     scale_price,
 )
@@ -47,6 +46,8 @@ def main():
     seed = args.seed
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
+    min_price = nash_price - 0.1
+    max_price = coop_price + 0.1
     nash = 0.22292696
     coop = 0.33749046
     N_AGENTS = 2
@@ -82,7 +83,8 @@ def main():
             leg[j] = "Deviating agent"
             for t in range(ir_profit_periods):
                 for i in range(N_AGENTS):
-                    price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
+                    action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
+                    price[i] = scale_price(action, min_price, max_price)
                 if t >= (ir_periods / 2):
                     nondev_profit += Pi(price.numpy())[j] * DISCOUNT ** (t - ir_periods / 2)
                 price_history[:, t] = price.detach()
@@ -92,7 +94,8 @@ def main():
             state = initial_state.clone()
             for t in range(ir_profit_periods):
                 for i in range(N_AGENTS):
-                    price[i] = scale_price(actor[i](state.unsqueeze(0))[0], c)
+                    action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
+                    price[i] = scale_price(action, min_price, max_price)
                 if t == (ir_periods / 2):
                     br = grad_desc(Pi, price.numpy(), j)
                     price[j] = torch.tensor(br)
@@ -109,7 +112,7 @@ def main():
             plt.legend(leg)
             for i in range(N_AGENTS):
                 plt.plot(price_history[i, :ir_periods])
-            plt.ylim(1.5, 2)
+            plt.ylim(min_price, max_price)
             plt.show()
             ir_arrays_defector.append(price_history[j, :ir_periods])
             for i in range(N_AGENTS):
