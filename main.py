@@ -21,7 +21,6 @@ from utils import impulse_response, scale_price, TanhNormal
 import logging
 import optuna
 from optuna.trial import TrialState
-from numba import jit
 
 # Soft Actor-Critic from OpenAI https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
 class SquashedGaussianMLPActor(nn.Module):
@@ -36,16 +35,15 @@ class SquashedGaussianMLPActor(nn.Module):
     def forward(self, obs, deterministic=False, with_logprob=True):
         x = self.net(obs)
         mu = self.mu(x)
-        std = self.std(x)
-        mu = F.softplus(std)
-        std = F.softplus(std)
-        dist = TanhNormal(mu, std)
 
         # Pre-squash distribution and sample
         if deterministic:
             # Only used for evaluating policy at test time.
             u, a = None, torch.tanh(mu)
         else:
+            std = self.std(x)
+            std = F.softplus(std)
+            dist = TanhNormal(mu, std)
             u, a = dist.rsample_with_pre_tanh_value()
 
         if with_logprob:
