@@ -52,6 +52,8 @@ def main():
     seed = args.seed
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
+    min_price = nash_price - 0.1
+    max_price = coop_price + 0.1
     nash = 0.22292696
     coop = 0.33749046
     N_AGENTS = 2
@@ -88,7 +90,8 @@ def main():
             for a_i, p1 in enumerate(w):
                 for a_j, p2 in enumerate(w):
                     state = torch.tensor([[p1, p2]])
-                    a = scale_price(actor[i](state)[0], c).detach()
+                    action, _ = actor[i](state, deterministic=True, with_logprob = False)
+                    a = scale_price(action, min_price, max_price).detach()
                     # print(f"{state} -> {a}")
                     A[i][a_i, a_j] = a
         plot_heatmap(A, f"Actions for seed {seed}", w=grid_size)
