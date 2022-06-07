@@ -1,46 +1,63 @@
 #!/usr/bin/env python3
 
+import torch
 import argparse
 import itertools
 import os
 import sys
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import torch
 
 from cycler import cycler
 
-from main import (
-    SquashedGaussianMLPActor,
-    MLPQFunction,
-    MLPActorCritic,
-    scale_price,
-)
-from utils import df, grad_desc, Pi
+from utils import Pi, scale_price, grad_desc
+from main import SquashedGaussianMLPActor
 
 def main():
     parser = argparse.ArgumentParser(description="Plot impulse responses")
     parser.add_argument("--seed", type=int, help="Random seed")
-    parser.add_argument("--t_max", type=int, help="Time periods elapsed")
-    parser.add_argument("--out_dir", type=str, help="Directory")
-    parser.add_argument("--start_prof_gains", type=float)
+    parser.add_argument("--out_dir", type=str, help="Random seed")
+    parser.add_argument("--t_max", type=int)
     args = parser.parse_args()
-    start_prof_gains = args.start_prof_gains
+    seed = args.seed
     out_dir = args.out_dir
     t_max = args.t_max
-    seed = args.seed
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
-    min_price = nash_price - 0.1
-    max_price = coop_price + 0.1
     nash = 0.22292696
     coop = 0.33749046
+    min_price = nash_price - 0.1
+    max_price = coop_price + 0.1
     n_agents = 2
-    mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
+    FNAME = "experiments.csv"
 
+    def pg(x):
+        return (x - nash) / (coop - nash)
+    df = pd.read_csv(FNAME, index_col=0)
+    rewards = np.load(f"{out_dir}/session_reward_{seed}.npy")
+    # Post processing
+    pivot = out_dir.find("lr")
+    exp_name = out_dir[:pivot]
+    param_str = out_dir[pivot:]
+    print(out_dir)
+    if np.min(rewards) > 1: # It's prices
+        rewards = np.apply_along_axis(Pi, 0, rewards)
+    rewards = pg(rewards)
+    start_t = t_max - t_max // 10
+    end_t = t_max
+    pg_end = rewards[:, start_t:end_t].mean()
+    print(f"Average profit gains at the end: {pg_end}")
+    # Get parameters
+    params = ["".join(filter(str.isdigit, i)) for i in param_str.split("_") if "-" not in i]
+    params = [i for i in params if len(i) > 0]
+    name_params = ["".join(filter(str.isalpha, i)) for i in param_str.split("_") if "-" not in i]
+    name_params = [i for i in name_params if len(i) > 0]
+    lrs = [[float("".join(filter(lambda x : not str.isalpha(x), i))) for i in j.split("-")] for j in param_str.split("_") if "lr" in j][0]
+    print(name_params)
+    print(params)
+    print(lrs)
+    # IR
     ir_periods = 60
     ir_arrays_compliant = []
     ir_arrays_defector = []
@@ -54,6 +71,7 @@ def main():
     ]
     print("Computing IRs...")
     ir_profit_periods = 1000
+    avg_dev_gain = 0
     DISCOUNT = 0.95
     with torch.inference_mode():
         for j in range(n_agents):
@@ -61,7 +79,7 @@ def main():
             price_history = np.zeros([n_agents, ir_profit_periods])
             state = torch.zeros(n_agents)
             for i in range(0, n_agents):
-                state[i] = (coop_price - nash_price) * start_prof_gains + nash_price
+                state[i] = (coop_price - nash_price) * pg_end + nash_price
             print(f"Initial state = {state}")
             price = state.clone()
             initial_state = state.clone()
@@ -92,31 +110,22 @@ def main():
                 price_history[:, t] = price
                 state = price
             dev_gain = (dev_profit / nondev_profit - 1) * 100
+            avg_dev_gain += dev_gain
             print(
                 f"Non-deviation profits = {nondev_profit:.3f}; Deviation profits = {dev_profit:.3f}; Deviation gain = {dev_gain:.3f}%"
             )
-            for i in range(n_agents):
-                plt.scatter(list(range(ir_periods)), price_history[i, :ir_periods])
-            plt.legend(leg)
-            for i in range(n_agents):
-                plt.plot(price_history[i, :ir_periods])
-            plt.ylim(min_price, max_price)
-            plt.show()
-            ir_arrays_defector.append(price_history[j, :ir_periods])
-            for i in range(n_agents):
-                if i != j:
-                    ir_arrays_compliant.append(price_history[i, :ir_periods])
-    ir_arrays_compliant = np.stack(ir_arrays_compliant).mean(axis=0)
-    ir_arrays_defector = np.stack(ir_arrays_defector).mean(axis=0)
-
-    leg = ["Non-deviating agent", "Deviating agent"]
-    plt.plot(ir_arrays_compliant)
-    plt.plot(ir_arrays_defector)
-    plt.scatter(list(range(ir_periods)), ir_arrays_compliant)
-    plt.scatter(list(range(ir_periods)), ir_arrays_defector)
-    plt.legend(leg)
-    plt.ylim(1.5, 2)
-    plt.show()
+    df.loc[len(df)] = {
+        "id": len(df),
+        "experiment_name": exp_name,
+        "seed": int(seed),
+        "buf_size": int(params[name_params.index("buf")]),
+        "actor_lr": float(lrs[0]),
+        "critic_lr": float(lrs[1]),
+        "profit_gain": pg_end,
+        "t": t_max,
+        "deviation_profit_percent": dev_gain / n_agents,
+    }
+    df.to_csv(FNAME)
 
 
 if __name__ == "__main__":

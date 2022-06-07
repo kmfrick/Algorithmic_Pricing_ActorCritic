@@ -12,6 +12,7 @@ import pandas as pd
 
 from cycler import cycler
 
+from utils import Pi
 
 def main():
     parser = argparse.ArgumentParser(description="Plot impulse responses")
@@ -30,9 +31,16 @@ def main():
     mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
 
     def pg(x):
-        return (x - nash_price) / (coop_price - nash_price)
-
+        return (x - nash) / (coop - nash)
     rewards = np.load(f"{out_dir}/session_reward_{seed}.npy")
+    # Post processing
+    if np.min(rewards) > 1: # It's prices
+        rewards = np.apply_along_axis(Pi, 0, rewards)
+    rewards = pg(rewards)
+    start_t = t_max - t_max // 10
+    end_t = t_max
+    pg_end = rewards[:, start_t:end_t].mean()
+    # Plot
     for i in range(N_AGENTS):
         r_series = pd.Series(rewards[i, :]).ewm(span=np.max(t_max) // 10)
         plt.plot(r_series.mean())
@@ -42,8 +50,8 @@ def main():
             r_series.mean() + r_series.std(),
             alpha=0.2,
         )
-    plt.axhline(nash)
-    plt.axhline(coop)
+    plt.axhline(0)
+    plt.axhline(1)
     plt.show()
 
 
