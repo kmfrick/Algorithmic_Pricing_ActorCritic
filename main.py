@@ -16,11 +16,9 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from cpprb import ReplayBuffer
 
-from utils import impulse_response, scale_price, TanhNormal
+from utils import scale_price, TanhNormal
 
 import logging
-import optuna
-from optuna.trial import TrialState
 
 # Soft Actor-Critic from OpenAI https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
 class SquashedGaussianMLPActor(nn.Module):
@@ -31,6 +29,7 @@ class SquashedGaussianMLPActor(nn.Module):
         self.net = nn.Sequential(fc1, activation(), fc2, activation())
         self.mu = nn.Linear(hidden_size, 1)
         self.std = nn.Linear(hidden_size, 1)
+        self.t = 0
 
     def forward(self, obs, deterministic=False, with_logprob=True):
         x = self.net(obs)
@@ -43,6 +42,8 @@ class SquashedGaussianMLPActor(nn.Module):
         else:
             std = self.std(x)
             std = F.softplus(std)
+            #torch.clamp(std, max = -(20/8e4 ** 3) * (self.t ** 3) + 20) # Decaying max variance. THIS BREAKS THE GRADIENT AT THE BORDER!
+            #self.t += 1
             dist = TanhNormal(mu, std)
             u, a = dist.rsample_with_pre_tanh_value()
 
@@ -147,7 +148,7 @@ class Agent:
             )
 
     def learn(self):
-        batch = self.replay_buffer.sample(min(self.batch_size, self.replay_buffer.get_next_index()))
+        batch = self.replay_buffer.sample(min(self.batch_size, self.replay_buffer.get_stored_size()))
         o, a, r, o2 = (
             torch.tensor(batch["obs"], device=self.device).squeeze(),
             torch.tensor(batch["act"], device=self.device),
@@ -227,9 +228,10 @@ class Agent:
         )
 
     def checkpoint(self, fpostfix, out_dir, t, i):
-        torch.save(self.ac.pi, f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
+        torch.save(self.ac.pi.state_dict(), f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
 
 def main():
+    parser = argparse.ArgumentParser(description="Run an experiment")
     parser.add_argument("--out_dir", type=str, help="Directory")
     parser.add_argument("--device", type=int, help="CUDA device")
     args = parser.parse_args()
@@ -239,34 +241,29 @@ def main():
     a0 = 0
     mu = 0.25
     c = 1
-    MAX_T = int(1e5)
+    MAX_T = int(8e4)
     CKPT_T = int(1e4)
     TARG_UPDATE_RATE = 0.999
     HIDDEN_SIZE = 2048
-    MIN_LR = 3e-5
-    MAX_LR = 3e-3
-    INITIAL_LR_ACTOR = 3e-4
-    INITIAL_LR_CRITIC = 3e-4
+    INITIAL_LR_ACTOR = 1e-3
+    INITIAL_LR_CRITIC = 5e-5
     AVG_REW_LR = 0.03
     TARGET_ENTROPY = -1
-    MIN_BUF_SIZE = 5
-    MAX_BUF_SIZE = 100
     BUF_SIZE = 20000
     BATCH_SIZE = 512
     IR_PERIODS = 20
 
-    print(trial.params)
-    out_dir = f"{sys.argv[1]}_lr{INITIAL_LR_ACTOR}-{INITIAL_LR_CRITIC}_buf{BUF_SIZE}"
+    out_dir = args.out_dir
+
     os.makedirs(out_dir, exist_ok=True)
     print(f"Will checkpoint every {CKPT_T} episodes")
     device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
 
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
-    SEEDS = [250917, 50321, 200722]
+    SEEDS = [250917, 50321, 200722, 190399, 40598, 220720, 71010, 130858, 150462, 1337]
     min_price = nash_price - 0.1
     max_price = coop_price + 0.1
-    avg_pg = 0
     for session in range(len(SEEDS)):
         fpostfix = SEEDS[session]
         # Random seeds
@@ -319,7 +316,7 @@ def main():
                         rew=profits[i].cpu(),
                         obs2=price.cpu(),
                     )
-                    if t > MAX_T / 3 and t % CKPT_T == 0:
+                    if (t - 3) % CKPT_T == 0:
                         agents[i].checkpoint(fpostfix, out_dir, t, i)
             if t > 1:
                 for i in range(n_agents):
@@ -351,10 +348,8 @@ def main():
         profit_gain = (
             torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy() - nash_price
         ) / (coop_price - nash_price)
-        avg_pg += profit_gain
         print("PG = {profit_gain}")
         np.save(f"{out_dir}/session_prices_{fpostfix}.npy", price_history.detach())
-    return avg_pg / len(SEEDS)
 
 if __name__ == "__main__":
     main()
