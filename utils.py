@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 
-import os
-import sys
-
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 import torch
 from torch.distributions import Normal
@@ -20,18 +14,25 @@ mu = 0.25
 c = 1
 
 
-def Pi(p):
+def profit_torch(ai, a0, mu, c, p):
+    q = torch.exp((ai - p) / mu) / (torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu))
+    pi = (p - c) * q
+    return pi
+
+
+def profit_numpy(p):
     q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
     pi = (p - c) * q
     return pi
 
+
 # https://cs231n.github.io/optimization-1/#gradcompute
 def df(f, x):
     """
-  a naive implementation of numerical gradient of f at x
-  - f should be a function that takes a single argument
-  - x is the point (numpy array) to evaluate the gradient at
-  """
+    a naive implementation of numerical gradient of f at x
+    - f should be a function that takes a single argument
+    - x is the point (numpy array) to evaluate the gradient at
+    """
     fx = f(x)  # evaluate function value at original point
     grad = np.zeros(x.shape)
     h = 0.00001
@@ -125,9 +126,7 @@ class TanhNormal(torch.distributions.Distribution):
         if pre_tanh_value is None:
             pre_tanh_value = torch.log((1 + epsilon + value) / (1 + epsilon - value)) / 2
         norm_lp = self._normal.log_prob(pre_tanh_value)
-        ret = norm_lp - torch.sum(
-            torch.log(self._clip_but_pass_gradient((1.0 - value ** 2)) + epsilon), axis=-1
-        )
+        ret = norm_lp - torch.sum(torch.log(self._clip_but_pass_gradient((1.0 - value**2)) + epsilon), axis=-1)
         return ret
 
     def sample(self, sample_shape=torch.Size()):

@@ -3,3 +3,6 @@ cpprb
 matplotlib
 numpy
 torch
+tqdm
+pandas
+cycler

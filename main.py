@@ -1,10 +1,9 @@
+#!/usr/bin/env python3
 import argparse
 import copy
 import os
-import sys
+
 import itertools
-import math
-import random
 
 from tqdm.auto import tqdm
 
@@ -13,75 +12,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.profiler import profile, record_function, ProfilerActivity
+
 from cpprb import ReplayBuffer
 
-from utils import scale_price, TanhNormal
+from utils import scale_price, profit_torch
 
-import logging
-
-# Soft Actor-Critic from OpenAI https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch/sac
-class SquashedGaussianMLPActor(nn.Module):
-    def __init__(self, obs_dim, hidden_size, activation):
-        super().__init__()
-        fc1 = nn.Linear(obs_dim, hidden_size)
-        fc2 = nn.Linear(hidden_size, hidden_size)
-        self.net = nn.Sequential(fc1, activation(), fc2, activation())
-        self.mu = nn.Linear(hidden_size, 1)
-        self.std = nn.Linear(hidden_size, 1)
-        self.t = 0
-
-    def forward(self, obs, deterministic=False, with_logprob=True):
-        x = self.net(obs)
-        mu = self.mu(x)
-
-        # Pre-squash distribution and sample
-        if deterministic:
-            # Only used for evaluating policy at test time.
-            u, a = None, torch.tanh(mu)
-        else:
-            std = self.std(x)
-            std = F.softplus(std)
-            #torch.clamp(std, max = -(20/8e4 ** 3) * (self.t ** 3) + 20) # Decaying max variance. THIS BREAKS THE GRADIENT AT THE BORDER!
-            #self.t += 1
-            dist = TanhNormal(mu, std)
-            u, a = dist.rsample_with_pre_tanh_value()
-
-        if with_logprob:
-            logp_pi = dist.log_prob(value=a, pre_tanh_value=u)
-        else:
-            logp_pi = None
-
-        return a, logp_pi
-
-class MLPQFunction(nn.Module):
-    def __init__(self, obs_dim, hidden_size, activation):
-        super().__init__()
-        fc1 = nn.Linear(obs_dim + 1, hidden_size)
-        fc2 = nn.Linear(hidden_size, hidden_size)
-        out = nn.Linear(hidden_size, 1)
-        self.net = nn.Sequential(fc1, activation(), fc2, activation(), out)
-
-    def forward(self, obs, act):
-        q = self.net(torch.cat([obs, act], dim=-1))
-        q = F.softplus(q)
-        return torch.squeeze(q, -1)  # Critical to ensure q has the right shape
-
-
-class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim, pi_hidden_size, q_hidden_size, device, activation):
-        super().__init__()
-
-        # build policy and value functions
-        self.pi = SquashedGaussianMLPActor(obs_dim, pi_hidden_size, activation).to(device)
-        self.q1 = MLPQFunction(obs_dim, q_hidden_size, activation).to(device)
-        self.q2 = MLPQFunction(obs_dim, q_hidden_size, activation).to(device)
-
-
-def compute_profit(ai, a0, mu, c, p):
-    q = torch.exp((ai - p) / mu) / (torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu))
-    pi = (p - c) * q
-    return pi
+from model import *
 
 
 class Agent:
@@ -99,7 +35,13 @@ class Agent:
         clip_norm=0.05,
     ):
         self.device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
-        self.ac = MLPActorCritic(n_agents, device=self.device, pi_hidden_size=(hidden_size // 8), q_hidden_size = hidden_size, activation = nn.Tanh)
+        self.ac = MLPActorCritic(
+            n_agents,
+            device=self.device,
+            pi_hidden_size=(hidden_size // 8),
+            q_hidden_size=hidden_size,
+            activation=nn.Tanh,
+        )
         self.q_params = itertools.chain(self.ac.q1.parameters(), self.ac.q2.parameters())
         self.replay_buffer = ReplayBuffer(
             buf_size,
@@ -143,9 +85,7 @@ class Agent:
             q1_next_targ = self.ac_targ.q1(next_state, action_next)
             q2_next_targ = self.ac_targ.q2(next_state, action_next)
             q_next_targ = torch.min(q1_next_targ, q2_next_targ)
-            self.profit_mean += (
-                self.lr_rew * (profit - self.profit_mean + q_next_targ - q_cur_targ).squeeze()
-            )
+            self.profit_mean += self.lr_rew * (profit - self.profit_mean + q_next_targ - q_cur_targ).squeeze()
 
     def learn(self):
         batch = self.replay_buffer.sample(min(self.batch_size, self.replay_buffer.get_stored_size()))
@@ -198,9 +138,7 @@ class Agent:
             q1_pi_targ = self.ac_targ.q1(o2, a2)
             q2_pi_targ = self.ac_targ.q2(o2, a2)
             q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-            backup = (
-                r - self.profit_mean
-            ) + q_pi_targ  # - temp * logp_a2 # Remove entropy in evaluation for SACLite
+            backup = (r - self.profit_mean) + q_pi_targ  # - temp * logp_a2 # Remove entropy in evaluation for SACLite
 
         # MSE loss against Bellman backup
         loss_q1 = F.mse_loss(q1, backup)
@@ -229,6 +167,7 @@ class Agent:
 
     def checkpoint(self, fpostfix, out_dir, t, i):
         torch.save(self.ac.pi.state_dict(), f"{out_dir}/actor_weights_{fpostfix}_t{t}_agent{i}.pth")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run an experiment")
@@ -261,9 +200,114 @@ def main():
 
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
-    # SEEDS = [250917, 50321, 200722, 190399, 40598, 220720, 71010, 130858, 150462, 1337] # 1st run
-    #SEEDS = [9149, 5283, 9173, 9933, 4517, 9257, 9767, 9564, 5209, 6531, 6649, 2963, 10267, 10830, 7224, 7789, 6885, 6627, 7888, 5849, 5495, 1148, 8562, 6579, 6609, 3951, 9786, 3099, 2387, 8413, 7332, 9575, 6780, 9001, 9825, 1725, 7184, 1251, 6998, 9921, 4541, 1281, 3331, 5882, 9956, 5504, 1802, 3491, 9928, 4002, 8499, 3903] # 2nd run
-    SEEDS = [6299, 9397, 7986, 9865, 10500, 4875, 10706, 7213, 4124, 2250, 6300, 7129, 5699, 3450, 4059, 8667, 5174, 6889, 3071, 3286, 6194, 1665, 4538, 2217, 9482, 5592, 2642, 10421, 4395, 9911, 4780, 7462, 6402, 10471, 4376, 9788, 2727, 6906, 3633, 5876, 10703, 10954, 4912, 1822, 5997, 5153, 3795, 2275, 4497, 7908, 8828] # 3rd run
+    SEEDS1 = [250917, 50321, 200722, 190399, 40598, 220720, 71010, 130858, 150462, 1337]  # 1st run
+    SEEDS2 = [
+        9149,
+        5283,
+        9173,
+        9933,
+        4517,
+        9257,
+        9767,
+        9564,
+        5209,
+        6531,
+        6649,
+        2963,
+        10267,
+        10830,
+        7224,
+        7789,
+        6885,
+        6627,
+        7888,
+        5849,
+        5495,
+        1148,
+        8562,
+        6579,
+        6609,
+        3951,
+        9786,
+        3099,
+        2387,
+        8413,
+        7332,
+        9575,
+        6780,
+        9001,
+        9825,
+        1725,
+        7184,
+        1251,
+        6998,
+        9921,
+        4541,
+        1281,
+        3331,
+        5882,
+        9956,
+        5504,
+        1802,
+        3491,
+        9928,
+        4002,
+        8499,
+        3903,
+    ]  # 2nd run
+    SEEDS = [
+        6299,
+        9397,
+        7986,
+        9865,
+        10500,
+        4875,
+        10706,
+        7213,
+        4124,
+        2250,
+        6300,
+        7129,
+        5699,
+        3450,
+        4059,
+        8667,
+        5174,
+        6889,
+        3071,
+        3286,
+        6194,
+        1665,
+        4538,
+        2217,
+        9482,
+        5592,
+        2642,
+        10421,
+        4395,
+        9911,
+        4780,
+        7462,
+        6402,
+        10471,
+        4376,
+        9788,
+        2727,
+        6906,
+        3633,
+        5876,
+        10703,
+        10954,
+        4912,
+        1822,
+        5997,
+        5153,
+        3795,
+        2275,
+        4497,
+        7908,
+        8828,
+    ]  # 3rd run
     min_price = nash_price - 0.1
     max_price = coop_price + 0.1
     for session in range(len(SEEDS)):
@@ -309,7 +353,7 @@ def main():
                         action[i] = agents[i].act(state).squeeze()
                     price[i] = scale_price(action[i], min_price, max_price)
                     price_history[i, t] = price[i]
-                profits = compute_profit(ai, a0, mu, c, price)
+                profits = profit_torch(ai, a0, mu, c, price)
                 profit_history[:, t] = profits
                 for i in range(n_agents):
                     agents[i].replay_buffer.add(
@@ -325,15 +369,9 @@ def main():
                     q_loss[i], pi_loss[i], temp[i], backup[i], grad_norm[i] = agents[i].learn()
                 with torch.no_grad():
                     start_t = max(t - BATCH_SIZE, 0)
-                    avg_price = np.round(
-                        torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                    )
-                    std_price = np.round(
-                        torch.std(price_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                    )
-                    avg_profit = np.round(
-                        torch.mean(profit_history[:, start_t:t], dim=1).cpu().numpy(), 3
-                    )
+                    avg_price = np.round(torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy(), 3)
+                    std_price = np.round(torch.std(price_history[:, start_t:t], dim=1).cpu().numpy(), 3)
+                    avg_profit = np.round(torch.mean(profit_history[:, start_t:t], dim=1).cpu().numpy(), 3)
                 ql = np.round(q_loss, 3)
                 pl = np.round(pi_loss, 3)
                 te = np.round(temp, 3)
@@ -347,11 +385,12 @@ def main():
             # CRUCIAL and easy to overlook: state = price
             state = price.unsqueeze(0)
         start_t = t - BATCH_SIZE
-        profit_gain = (
-            torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy() - nash_price
-        ) / (coop_price - nash_price)
+        profit_gain = (torch.mean(price_history[:, start_t:t], dim=1).cpu().numpy() - nash_price) / (
+            coop_price - nash_price
+        )
         print(f"PG = {profit_gain}")
         np.save(f"{out_dir}/session_prices_{fpostfix}.npy", price_history.detach())
+
 
 if __name__ == "__main__":
     main()
