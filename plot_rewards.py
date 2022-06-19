@@ -14,13 +14,10 @@ from cycler import cycler
 
 from utils import Pi
 
-def plot_profits_and_variance(n_agents, profits, pg, t_max):
+def plot_profits_and_variance(n_agents, profits, pg):
     profits = pg(profits)
-    start_t = t_max - t_max // 10
-    end_t = t_max
-    pg_end = profits[:, start_t:end_t].mean()
     for i in range(n_agents):
-        r_series = pd.Series(profits[i, :]).rolling(window=1000)#.ewm(span=np.max(t_max) // 10)
+        r_series = pd.Series(profits[i, :]).rolling(window=1000)
         plt.plot(r_series.mean())
         plt.fill_between(
             range(len(r_series.mean())),
@@ -43,11 +40,9 @@ def main():
     parser = argparse.ArgumentParser(description="Plot profits")
     parser.add_argument("--seeds", type=int, help="Random seeds", nargs="+")
     parser.add_argument("--out_dir", type=str, help="Random seed")
-    parser.add_argument("--t_max", type=int)
     parser.add_argument("--plot_intermediate", action="store_const", const=True, default=False)
     args = parser.parse_args()
     out_dir = args.out_dir
-    t_max = args.t_max
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
     nash = 0.22292696
@@ -62,10 +57,10 @@ def main():
         if np.min(profits_cur) > 1: # It's prices
             profits_cur = np.apply_along_axis(Pi, 0, profits_cur)
         if args.plot_intermediate:
-            plot_profits_and_variance(n_agents, profits_cur, pg, args.t_max)
+            plot_profits_and_variance(n_agents, profits_cur, pg)
         r.append(profits_cur)
     profits = np.stack(r, axis=0).mean(axis=0)
-    plot_profits_and_variance(n_agents, profits, pg, args.t_max)
+    plot_profits_and_variance(n_agents, profits, pg)
     print(profits.shape)
     profit_gains = np.apply_along_axis(pg, 0, profits)
     pg_series = pd.Series(profit_gains.mean(axis=0)).rolling(window=1000)

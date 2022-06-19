@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--actor_hidden_size", type=int)
     parser.add_argument("--plot_intermediate", action="store_const", const=True, default=False)
     parser.add_argument("--defect_to_nash", action="store_const", const=True, default=False)
+    parser.add_argument("--defect_to_coop", action="store_const", const=True, default=False)
     parser.add_argument("--defect_to_c", action="store_const", const=True, default=False)
     parser.add_argument("--undershoot", action="store_const", const=True, default=False)
     args = parser.parse_args()
@@ -99,6 +100,8 @@ def main():
                     if t == (ir_periods / 2):
                         if args.defect_to_nash:
                             br = nash_price
+                        elif args.defect_to_coop:
+                            br = coop_price
                         elif args.defect_to_c:
                             br = c
                         else:
