@@ -228,6 +228,10 @@ def main():
         # Plot average profits
         profits = np.stack(r, axis=0).mean(axis=0)
         plot_profits(n_agents, profits, pg, args.movavg_span)
+        sns.despine()
+        plt.savefig(f"{out_dir}_plots/avg_profit_gain_t{t_max}.svg")
+        plt.clf()
+        # Plot average profits across agents
         print(profits.shape)
         profit_gains = np.apply_along_axis(pg, 0, profits)
         pg_series = pd.Series(profit_gains.mean(axis=0)).rolling(window=args.movavg_span)
@@ -241,7 +245,7 @@ def main():
         plt.axhline(0)
         plt.axhline(1)
         sns.despine()
-        plt.savefig(f"{out_dir}_plots/avg_profit_gain_t{t_max}.svg")
+        plt.savefig(f"{out_dir}_plots/avg_mean_profit_gain_t{t_max}.svg")
         plt.clf()
 
         # Plot average state-action heatmap
