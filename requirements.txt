@@ -6,3 +6,4 @@ torch
 tqdm
 pandas
 cycler
+seaborn
