@@ -65,7 +65,60 @@ def main():
     parser.add_argument("--plot_intermediate", action="store_const", const=True, default=False)
     parser.add_argument("--seeds", type=int, help="Random seeds", nargs="+")
     parser.add_argument("--movavg_span", type=int, help="Moving average span", default=1000)
+    parser.add_argument("--parse_csv", action="store_const", const=True, default=False)
     args = parser.parse_args()
+    if args.parse_csv():
+        df = pd.read_csv("experiments_new.csv")
+        df = df.drop(df.columns[[0, 1]], axis=1)
+        df["dev_profit_percent_coop"] = None
+        df["dev_profit_percent_cost"] = None
+        df["dev_profit_percent_nash"] = None
+        df["dev_profit_percent_br"] = None
+        df["dev_profit_diff_coop"] = None
+        df["dev_profit_diff_cost"] = None
+        df["dev_profit_diff_nash"] = None
+        df["dev_profit_diff_br"] = None
+        # Separate columns for each deviation type
+        for dtype in ["nash", "br", "coop", "cost"] {
+          for seed in df.seed.unique() {
+            for t in df.t.unique() {
+              df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_percent_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"deviation_profit_percent"].item()
+              df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_diff_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"differential_deviation_profit"].item()
+            }
+          }
+        }
+        df = df.drop(["deviation_type", "deviation_profit_percent", "differential_deviation_profit"], axis = 1)
+        df = df.unique()
+
+
+        df["unprofitable_dev_diff_coop"]  = (df["dev_profit_diff_coop"] <  0).astype(int)
+        df["unprofitable_dev_diff_cost"]  = (df["dev_profit_diff_cost"] <  0).astype(int)
+        df["unprofitable_dev_diff_nash"]  = (df["dev_profit_diff_nash"] <  0).astype(int)
+        df["unprofitable_dev_diff_br"]  = (df["dev_profit_diff_br"] <  0).astype(int)
+        df["unprofitable_dev_percent_coop"]  = (df["dev_profit_percent_coop"] <  0).astype(int)
+        df["unprofitable_dev_percent_cost"]  = (df["dev_profit_percent_cost"] <  0).astype(int)
+        df["unprofitable_dev_percent_nash"]  = (df["dev_profit_percent_nash"] <  0).astype(int)
+        df["unprofitable_dev_percent_br"]  = (df["dev_profit_percent_br"] <  0).astype(int)
+        for (t in df.t.unique()) {
+          df_s = df.loc[df.t == t,:]
+          plt.hist(df_s.profit_gain)
+          plt.xlab(f"Profit gains (t = {t - 3})")
+          plt.show()
+          # Remove non-stat columns and print table
+          plt.hist(df.differential_deviation_profit)
+          plt.xlab(f"Differential deviation profit (t = {t - 3})")
+          plt.show()
+          plt.hist(df.deviation_profit_percent)
+          plt.xlab(f"Discounted deviatiion profit (t = {t - 3})")
+          plt.show()
+        }
+        exit()
+
+
+
+
+
+
     out_dir = args.out_dir
     # Create output directory
     os.makedirs(f"{out_dir}_plots", exist_ok=True)
