@@ -67,7 +67,11 @@ def main():
     parser.add_argument("--movavg_span", type=int, help="Moving average span", default=1000)
     parser.add_argument("--parse_csv", action="store_const", const=True, default=False)
     args = parser.parse_args()
-    if args.parse_csv():
+    out_dir = args.out_dir
+    # Create output directory
+    os.makedirs(f"{out_dir}_plots", exist_ok=True)
+    deviation_types = ["nash", "br", "coop", "cost"]
+    if args.parse_csv:
         df = pd.read_csv("experiments_new.csv")
         df = df.drop(df.columns[[0, 1]], axis=1)
         df["dev_profit_percent_coop"] = None
@@ -79,39 +83,36 @@ def main():
         df["dev_profit_diff_nash"] = None
         df["dev_profit_diff_br"] = None
         # Separate columns for each deviation type
-        for dtype in ["nash", "br", "coop", "cost"] {
-          for seed in df.seed.unique() {
-            for t in df.t.unique() {
-              df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_percent_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"deviation_profit_percent"].item()
-              df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_diff_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"differential_deviation_profit"].item()
-            }
-          }
-        }
+        for dtype in deviation_types:
+            for seed in df.seed.unique():
+                for t in df.t.unique():
+                    df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_percent_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"deviation_profit_percent"].item()
+                    df.loc[(df["seed"] == seed) & (df["t"] == t), f"dev_profit_diff_{dtype}"] = df.loc[(df["seed"] == seed) & (df["t"] == t) & (df["deviation_type"] == dtype),"differential_deviation_profit"].item()
         df = df.drop(["deviation_type", "deviation_profit_percent", "differential_deviation_profit"], axis = 1)
-        df = df.unique()
+        df["deviation_profit_percent"] = df[[f"dev_profit_percent_{dtype}" for dtype in deviation_types]].mean(axis=1)
+        df["differential_deviation_profit"] = df[[f"dev_profit_diff_{dtype}" for dtype in deviation_types]].mean(axis=1)
+        df = df.drop_duplicates()
 
-
-        df["unprofitable_dev_diff_coop"]  = (df["dev_profit_diff_coop"] <  0).astype(int)
-        df["unprofitable_dev_diff_cost"]  = (df["dev_profit_diff_cost"] <  0).astype(int)
-        df["unprofitable_dev_diff_nash"]  = (df["dev_profit_diff_nash"] <  0).astype(int)
-        df["unprofitable_dev_diff_br"]  = (df["dev_profit_diff_br"] <  0).astype(int)
-        df["unprofitable_dev_percent_coop"]  = (df["dev_profit_percent_coop"] <  0).astype(int)
-        df["unprofitable_dev_percent_cost"]  = (df["dev_profit_percent_cost"] <  0).astype(int)
-        df["unprofitable_dev_percent_nash"]  = (df["dev_profit_percent_nash"] <  0).astype(int)
-        df["unprofitable_dev_percent_br"]  = (df["dev_profit_percent_br"] <  0).astype(int)
-        for (t in df.t.unique()) {
+        for dtype in deviation_types:
+            df[f"unprofitable_dev_diff_{dtype}"]  = (df[f"dev_profit_diff_{dtype}"] <  0).astype(int)
+            df[f"unprofitable_dev_percent_{dtype}"]  = (df[f"dev_profit_percent_{dtype}"] <  0).astype(int)
+        for t in df.t.unique():
           df_s = df.loc[df.t == t,:]
-          plt.hist(df_s.profit_gain)
-          plt.xlab(f"Profit gains (t = {t - 3})")
-          plt.show()
-          # Remove non-stat columns and print table
-          plt.hist(df.differential_deviation_profit)
-          plt.xlab(f"Differential deviation profit (t = {t - 3})")
-          plt.show()
-          plt.hist(df.deviation_profit_percent)
-          plt.xlab(f"Discounted deviatiion profit (t = {t - 3})")
-          plt.show()
-        }
+          plt.hist(df_s["profit_gain"], align="left")
+          plt.xlabel(f"Profit gains (t = {t - 3})")
+          sns.despine()
+          plt.savefig(f"{out_dir}_plots/pg_hist_t{t}.svg")
+          plt.clf()
+          plt.hist(df_s["differential_deviation_profit"], align="left")
+          plt.xlabel(f"Differential deviation profit (t = {t - 3}, $\gamma$ = {args.discount})")
+          sns.despine()
+          plt.savefig(f"{out_dir}_plots/diff_dev_prof_hist_t{t}.svg")
+          plt.clf()
+          plt.hist(df_s["deviation_profit_percent"], align="left")
+          plt.xlabel(f"Discounted deviatiion profit (t = {t - 3}, $\gamma$ = {args.discount})")
+          sns.despine()
+          plt.savefig(f"{out_dir}_plots/disc_dev_prof_hist_t{t}.svg")
+          plt.clf()
         exit()
 
 
@@ -119,9 +120,6 @@ def main():
 
 
 
-    out_dir = args.out_dir
-    # Create output directory
-    os.makedirs(f"{out_dir}_plots", exist_ok=True)
     nash_price = 1.4729273733327568
     coop_price = 1.9249689958811602
     xi = 0.1
@@ -145,7 +143,7 @@ def main():
         prof_gains_start_meas_t = t_max - args.movavg_span
         state_action_maps = []
         for seed in args.seeds:
-            avg_dev_gain = {"br": 0, "nash": 0, "cost": 0, "coop": 0}
+            avg_dev_gain = {d: 0 for d in deviation_type}
             avg_dev_diff_profit = {"br": 0, "nash": 0, "cost": 0, "coop": 0}
             ir_arrays_compliant = {"br": [], "nash": [], "cost": [], "coop": []}
             ir_arrays_defector = {"br": [], "nash": [], "cost": [], "coop": []}
