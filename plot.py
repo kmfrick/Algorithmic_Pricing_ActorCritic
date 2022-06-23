@@ -19,6 +19,8 @@ plt.rcParams.update({
   "text.usetex": True,
 })
 
+plt.rcParams['figure.figsize'] = [6.4, 2.4]
+
 
 def plot_heatmap(arr,  min_price, max_price, w=100):
     plt.tight_layout()
@@ -92,8 +94,8 @@ def main():
         for seed in args.seeds:
             avg_dev_gain = {"br": 0, "nash": 0, "cost": 0, "coop": 0}
             avg_dev_diff_profit = {"br": 0, "nash": 0, "cost": 0, "coop": 0}
-            ir_arrays_compliant = []
-            ir_arrays_defector = []
+            ir_arrays_compliant = {"br": [], "nash": [], "cost": [], "coop": []}
+            ir_arrays_defector = {"br": [], "nash": [], "cost": [], "coop": []}
             device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
             ir_profit_periods = 1000
             actor = []
@@ -109,10 +111,10 @@ def main():
                 actor.append(a)
             with torch.inference_mode():
                 # Compute session profit gains
-                profits_cur = np.load(f"{out_dir}/session_prices_{seed}.npy")
-                profits_cur = profits_cur[:, :t_max]
-                if np.min(profits_cur) > 1:  # It's prices
-                    profits_cur = np.apply_along_axis(profit_numpy, 0, profits_cur)
+                raw_out = np.load(f"{out_dir}/session_prices_{seed}.npy")
+                raw_out = raw_out[:, :t_max]
+                if np.min(raw_out) > c:  # It's prices
+                    profits_cur = np.apply_along_axis(profit_numpy, 0, raw_out)
                 if args.plot_intermediate:
                     plot_profits(n_agents, profits_cur, pg, args.movavg_span)
                     sns.despine()
@@ -120,7 +122,14 @@ def main():
                     plt.clf()
                 r.append(profits_cur)
                 session_prof_gains = np.mean(pg(profits_cur[:, prof_gains_start_meas_t:]))
+                if np.max(raw_out) < c: # We don't have prices
+                    last_prices = torch.zeros(n_agents)
+                    for i in range(0, n_agents):
+                        last_prices[i] = (coop_price - nash_price) * session_prof_gains + nash_price
+                else:
+                    last_prices = torch.tensor(raw_out[:, prof_gains_start_meas_t:]).mean(1)
                 print(f"Profits at convergence for seed {seed} = {session_prof_gains}")
+                print(f"Prices at convergence for seed {seed} = {last_prices}")
                 last_prof_gains[seed] = session_prof_gains
 
                 # Create and plot state-action map
@@ -145,9 +154,7 @@ def main():
                     for j in range(n_agents):
                         # Impulse response
                         price_history = np.zeros([n_agents, ir_profit_periods])
-                        state = torch.zeros(n_agents)
-                        for i in range(0, n_agents):
-                            state[i] = (coop_price - nash_price) * session_prof_gains + nash_price
+                        state = last_prices.clone()
                         price = state.clone()
                         initial_state = state.clone()
                         # First compute non-deviation profits
@@ -158,8 +165,8 @@ def main():
                             for i in range(n_agents):
                                 action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
                                 price[i] = scale_price(action, min_price, max_price)
-                            if t >= (ir_periods / 2):
-                                nondev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - ir_periods / 2)
+                            if t >= dev_t:
+                                nondev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - dev_t)
                             price_history[:, t] = price.detach()
                             state = price
                             conv_price = price.clone().numpy()
@@ -173,7 +180,7 @@ def main():
                                 action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
                                 price[i] = scale_price(action, min_price, max_price)
                                 orig_price = price[j].item()
-                            if t == (ir_periods / 2):
+                            if t == dev_t:
                                 if deviation_type == "nash":
                                     br = nash_price
                                 elif deviation_type == "coop":
@@ -183,8 +190,8 @@ def main():
                                 else:
                                     br = grad_desc(profit_numpy, price.clone().numpy(), j)
                                 price[j] = torch.tensor(br)
-                            if t >= (ir_periods / 2):
-                                dev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - ir_periods / 2)
+                            if t >= dev_t:
+                                dev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - dev_t)
                             price_history[:, t] = price
                             state = price
                         dev_gain = (dev_profit / nondev_profit - 1) * 100
@@ -197,19 +204,18 @@ def main():
                         )
                         if args.plot_intermediate:
                             for i in range(n_agents):
-                                plt.scatter(list(range(ir_periods)), price_history[i, :ir_periods], s=16)
+                                plt.scatter(list(range(dev_t - 1, ir_periods)), price_history[i, (dev_t - 1):ir_periods], s=16)
                             plt.legend(leg)
                             for i in range(n_agents):
-                                plt.plot(price_history[i, :ir_periods], linestyle="dashed")
+                                plt.plot(price_history[i, (dev_t - 1):ir_periods], linestyle="dashed")
                             plt.ylim(min_price, max_price)
                             sns.despine()
                             plt.savefig(f"{out_dir}_plots/{seed}_ir_{deviation_type}_t{t_max}.svg")
                             plt.clf()
-                        if deviation_type == "br":
-                            ir_arrays_defector.append(price_history[j, :ir_periods])
-                            for i in range(n_agents):
-                                if i != j:
-                                    ir_arrays_compliant.append(price_history[i, :ir_periods])
+                        ir_arrays_defector[deviation_type].append(price_history[j, :ir_periods])
+                        for i in range(n_agents):
+                            if i != j:
+                                ir_arrays_compliant[deviation_type].append(price_history[i, :ir_periods])
                     new_row = {
                         "id": len(df),
                         "experiment_name": out_dir,
@@ -222,9 +228,9 @@ def main():
                         "deviation_type": deviation_type,
                         "differential_deviation_profit": avg_dev_diff_profit[deviation_type] / n_agents
                     }
-                if len(df) == 0:
-                    df = pd.DataFrame(columns=list(new_row.keys()))
-                df.loc[len(df)] = new_row
+                    if len(df) == 0:
+                        df = pd.DataFrame(columns=list(new_row.keys()))
+                    df.loc[len(df)] = new_row
         # Plot average profits
         profits = np.stack(r, axis=0).mean(axis=0)
         plot_profits(n_agents, profits, pg, args.movavg_span)
@@ -256,41 +262,43 @@ def main():
             max_price,
             w=args.grid_size,
         )
-        sns.despine()
         plt.savefig(f"{out_dir}_plots/avg_state_action_heatmap_t{t_max}.svg")
         plt.clf()
 
         # Plot average IR
-        ir_stack_compliant = np.stack(ir_arrays_compliant, axis=0)
-        ir_stack_defector = np.stack(ir_arrays_defector, axis=0)
-        ir_box_compliant = [
-            ir_stack_compliant[:, t] - ir_stack_compliant[:, dev_t - 1] for t in range(dev_t - 1, ir_periods)
-        ]
-        ir_box_defector = [ir_stack_defector[:, t] - ir_stack_defector[:, dev_t - 1] for t in range(dev_t - 1, ir_periods)]
-        plt.boxplot(ir_box_compliant)
-        sns.despine()
-        plt.savefig(f"{out_dir}_plots/avg_ir_box_compliant_t{t_max}.svg")
-        plt.clf()
-        plt.boxplot(ir_box_defector)
-        sns.despine()
-        plt.savefig(f"{out_dir}_plots/avg_ir_box_defector_t{t_max}.svg")
-        plt.clf()
-        ir_mean_compliant = ir_stack_compliant.mean(axis=0)
-        ir_mean_defector = ir_stack_defector.mean(axis=0)
+        for deviation_type in avg_dev_gain.keys():
+            ir_stack_compliant = np.stack(ir_arrays_compliant[deviation_type], axis=0)
+            ir_stack_defector = np.stack(ir_arrays_defector[deviation_type], axis=0)
+            ir_box_compliant = [
+                ir_stack_compliant[:, t] - ir_stack_compliant[:, dev_t - 1] for t in range(dev_t - 1, ir_periods)
+            ]
+            ir_box_defector = [ir_stack_defector[:, t] - ir_stack_defector[:, dev_t - 1] for t in range(dev_t - 1, ir_periods)]
+            plt.boxplot(ir_box_compliant)
+            sns.despine()
+            plt.savefig(f"{out_dir}_plots/avg_ir_{deviation_type}_box_compliant_t{t_max}.svg")
+            plt.clf()
+            plt.boxplot(ir_box_defector)
+            sns.despine()
+            plt.savefig(f"{out_dir}_plots/avg_ir_{deviation_type}_box_defector_t{t_max}.svg")
+            plt.clf()
+            ir_mean_compliant = ir_stack_compliant.mean(axis=0)
+            ir_mean_defector = ir_stack_defector.mean(axis=0)
 
-        ir_mean_compliant = ir_mean_compliant[(dev_t - 1) :]
-        ir_mean_defector = ir_mean_defector[(dev_t - 1) :]
+            ir_mean_compliant = ir_mean_compliant[(dev_t - 1) :]
+            ir_mean_defector = ir_mean_defector[(dev_t - 1) :]
 
-        leg = ["Non-deviating agent", "Deviating agent"]
-        plt.plot(ir_mean_compliant, "bo-")
-        plt.plot(ir_mean_defector, "ro-")
-        plt.legend(leg)
-        plt.ylim(min_price, max_price)
-        plt.axhline(nash_price)
-        plt.axhline(coop_price)
-        sns.despine()
-        plt.savefig(f"{out_dir}_plots/avg_ir_t{t_max}.svg")
-        plt.clf()
+            leg = ["Non-deviating agent", "Deviating agent"]
+            plt.scatter(list(range(len(ir_mean_compliant))), ir_mean_compliant, s=16)
+            plt.scatter(list(range(len(ir_mean_defector ))), ir_mean_defector, s=16)
+            plt.legend(leg)
+            plt.plot(ir_mean_compliant, linestyle="dashed")
+            plt.plot(ir_mean_defector, linestyle="dashed")
+            plt.axhline(nash_price)
+            plt.axhline(coop_price)
+            plt.ylim(min_price, max_price)
+            sns.despine()
+            plt.savefig(f"{out_dir}_plots/avg_ir_{deviation_type}_t{t_max}.svg")
+            plt.clf()
 
     df.to_csv(args.filename)
 
