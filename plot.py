@@ -39,7 +39,7 @@ def plot_heatmap(arr,  min_price, max_price, w=100):
 
 
 def plot_profits(n_agents, profits, pg, movavg_span):
-    profits = pg(profits)
+    profits = np.apply_along_axis(pg, 0, profits)
     for i in range(n_agents):
         r_series = pd.Series(profits[i, :]).rolling(window=movavg_span)
         plt.plot(r_series.mean())
@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--seeds", type=int, help="Random seeds", nargs="+")
     parser.add_argument("--movavg_span", type=int, help="Moving average span", default=1000)
     parser.add_argument("--parse_csv", action="store_const", const=True, default=False)
+    parser.add_argument("--n_agents", type=int, help="Number of agents")
     args = parser.parse_args()
     out_dir = args.out_dir
     # Create output directory
@@ -118,18 +119,37 @@ def main():
 
 
 
+    n_agents = args.n_agents
+    ai = 2
+    a0 = 0
+    mu = 0.25
+    c = 1
+    # Equilibrium price computation by Massimiliano Furlan
+    # https://github.com/massimilianofurlangit/algorithmic_pricing/blob/main/functions.jl
+    # nash price is a fixed point of the equation p = c + \mu / (1 - (n + exp[(a0 - a + p)/mu]))^(-1) see Anderson and De Palma (1992)
+    print("Computing equilibrium prices...")
+    def f(p):
+        return c + mu/(1 - (n_agents + np.exp((a0 - ai + p) / mu)) ** (-1))
+    nash_price = ai
+    while np.abs(nash_price - f(nash_price)) > 1e-8:
+        nash_price = f(nash_price)
+    # coop price maximizes the firms' joint profits (here I assume symmetry, and solve single-agent problem)
+    coop_price = ai
+    def profit_symm(p):
+        return (p - c) * np.exp((ai - p) / mu) / (n_agents * np.exp((ai - p) / mu) + np.exp(a0 / mu))
+    def grad_f(f, x, h=1e-10):
+        return (f(x + h) - f(x - h)) / (2 * h)
+    print(np.abs(grad_f(profit_symm, coop_price)))
+    while np.abs(grad_f(profit_symm, coop_price)):
+        coop_price += 1e-5 * grad_f(profit_symm, coop_price)
 
-
-    nash_price = 1.4729273733327568
-    coop_price = 1.9249689958811602
+    print(f"No. of agents = {n_agents}. Nash price = {nash_price:.4f}. Cooperation price = {coop_price:.4f}")
     xi = 0.1
     min_price = nash_price - xi
     max_price = coop_price + xi
-    nash = 0.22292696
-    coop = 0.33749046
-    n_agents = 2
-    c = 1
-    #mpl.rcParams["axes.prop_cycle"] = cycler(color=["b", "r", "g", "y"])
+
+    nash = profit_numpy(np.ones(n_agents) * nash_price)
+    coop = profit_numpy(np.ones(n_agents) * coop_price)
     ir_periods = 30
     dev_t = ir_periods // 2
     df = pd.DataFrame()
@@ -143,10 +163,10 @@ def main():
         prof_gains_start_meas_t = t_max - args.movavg_span
         state_action_maps = []
         for seed in args.seeds:
-            avg_dev_gain = {d: 0 for d in deviation_type}
-            avg_dev_diff_profit = {"br": 0, "nash": 0, "cost": 0, "coop": 0}
-            ir_arrays_compliant = {"br": [], "nash": [], "cost": [], "coop": []}
-            ir_arrays_defector = {"br": [], "nash": [], "cost": [], "coop": []}
+            avg_dev_gain = {d: 0 for d in deviation_types}
+            avg_dev_diff_profit = {d: 0 for d in deviation_types}
+            ir_arrays_compliant = {d: [] for d in deviation_types}
+            ir_arrays_defector = {d: [] for d in deviation_types}
             device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
             ir_profit_periods = 1000
             actor = []
@@ -172,7 +192,7 @@ def main():
                     plt.savefig(f"{out_dir}_plots/{seed}_profit_t{t_max}.svg")
                     plt.clf()
                 r.append(profits_cur)
-                session_prof_gains = np.mean(pg(profits_cur[:, prof_gains_start_meas_t:]))
+                session_prof_gains = np.mean(np.apply_along_axis(pg, 0, profits_cur[:, prof_gains_start_meas_t:]))
                 if np.max(raw_out) < c: # We don't have prices
                     last_prices = torch.zeros(n_agents)
                     for i in range(0, n_agents):
@@ -183,23 +203,24 @@ def main():
                 print(f"Prices at convergence for seed {seed} = {last_prices}")
                 last_prof_gains[seed] = session_prof_gains
 
-                # Create and plot state-action map
-                w = torch.linspace(min_price, max_price, args.grid_size, requires_grad=False)
-                A = [np.zeros([args.grid_size, args.grid_size]) for i in range(n_agents)]
-                print("Computing state-action map...")
-                for i in range(n_agents):
-                    for a_i, p1 in enumerate(w):
-                        for a_j, p2 in enumerate(w):
-                            state = torch.tensor([[p1, p2]])
-                            action, _ = actor[i](state, deterministic=True, with_logprob=False)
-                            a = scale_price(action, min_price, max_price).detach()
-                            # print(f"{state} -> {a}")
-                            A[i][a_i, a_j] = a.numpy()
-                state_action_maps.append(A)
-                if args.plot_intermediate:
-                    plot_heatmap(A, min_price, max_price, w=args.grid_size)
-                    plt.savefig(f"{out_dir}_plots/{seed}_state_action_map_t{t_max}.svg")
-                    plt.clf()
+                if n_agents == 2:
+                    # Create and plot state-action map
+                    w = torch.linspace(min_price, max_price, args.grid_size, requires_grad=False)
+                    A = [np.zeros([args.grid_size, args.grid_size]) for i in range(n_agents)]
+                    print("Computing state-action map...")
+                    for i in range(n_agents):
+                        for a_i, p1 in enumerate(w):
+                            for a_j, p2 in enumerate(w):
+                                state = torch.tensor([[p1, p2]])
+                                action, _ = actor[i](state, deterministic=True, with_logprob=False)
+                                a = scale_price(action, min_price, max_price).detach()
+                                # print(f"{state} -> {a}")
+                                A[i][a_i, a_j] = a.numpy()
+                    state_action_maps.append(A)
+                    if args.plot_intermediate:
+                        plot_heatmap(A, min_price, max_price, w=args.grid_size)
+                        plt.savefig(f"{out_dir}_plots/{seed}_state_action_map_t{t_max}.svg")
+                        plt.clf()
                 # Plot impulse responses
                 for deviation_type in avg_dev_gain.keys():
                     for j in range(n_agents):
@@ -306,15 +327,16 @@ def main():
         plt.clf()
 
         # Plot average state-action heatmap
-        average_state_action_map = np.stack(state_action_maps, axis=0).mean(axis=0)
-        plot_heatmap(
-            average_state_action_map,
-            min_price,
-            max_price,
-            w=args.grid_size,
-        )
-        plt.savefig(f"{out_dir}_plots/avg_state_action_heatmap_t{t_max}.svg")
-        plt.clf()
+        if n_agents == 2:
+            average_state_action_map = np.stack(state_action_maps, axis=0).mean(axis=0)
+            plot_heatmap(
+                average_state_action_map,
+                min_price,
+                max_price,
+                w=args.grid_size,
+            )
+            plt.savefig(f"{out_dir}_plots/avg_state_action_heatmap_t{t_max}.svg")
+            plt.clf()
 
         # Plot average IR
         for deviation_type in avg_dev_gain.keys():
@@ -339,6 +361,8 @@ def main():
             ir_mean_defector = ir_mean_defector[(dev_t - 1) :]
 
             leg = ["Non-deviating agent", "Deviating agent"]
+            if n_agents > 2:
+                leg[0] = "Non-deviating agents (mean)"
             plt.scatter(list(range(len(ir_mean_compliant))), ir_mean_compliant, s=16)
             plt.scatter(list(range(len(ir_mean_defector ))), ir_mean_defector, s=16)
             plt.legend(leg)

@@ -199,8 +199,8 @@ def main():
     print(f"Will checkpoint every {CKPT_T} episodes")
     device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
 
-    SEEDS = [250917, 50321, 200722, 190399, 40598, 220720, 71010, 130858, 150462, 1337, 9149,5283,9173,9933,4517,9257,9767,9564,5209,6531,6649,2963,10267,10830,7224,7789,6885,6627,7888,5849,5495,1148,8562,6579,6609,3951,9786,3099,2387,8413,7332,9575,6780,9001,9825,1725,7184,1251,6998,9921,4541,1281,3331,5882,9956,5504,1802,3491,9928,4002,8499,3903,] # 1st run
-    #SEEDS=[6299,9397,7986,9865,10500,4875,10706,7213,4124,2250,6300,7129,5699,3450,4059,8667,5174,6889,3071,3286,6194,1665,4538,2217,9482,5592,2642,10421,4395,9911,4780,7462,6402,10471,4376,9788,2727,6906,3633,5876,10703,10954,4912,1822,5997,5153,3795,2275,4497,7908,8828,] # 2nd run
+    #SEEDS = [250917, 50321, 200722, 190399, 40598, 220720, 71010, 130858, 150462, 1337, 9149,5283,9173,9933,4517,9257,9767,9564,5209,6531,6649,2963,10267,10830,7224,7789,6885,6627,7888,5849,5495,1148,8562,6579,6609,3951,9786,3099,2387,8413,7332,9575,6780,9001,9825,1725,7184,1251,6998,9921,4541,1281,3331,5882,9956,5504,1802,3491,9928,4002,8499,3903,] # 1st run
+    SEEDS=[6299,9397,7986,9865,10500,4875,10706,7213,4124,2250,6300,7129,5699,3450,4059,8667,5174,6889,3071,3286,6194,1665,4538,2217,9482,5592,2642,10421,4395,9911,4780,7462,6402,10471,4376,9788,2727,6906,3633,5876,10703,10954,4912,1822,5997,5153,3795,2275,4497,7908,8828,] # 2nd run
     # Equilibrium price computation by Massimiliano Furlan
     # https://github.com/massimilianofurlangit/algorithmic_pricing/blob/main/functions.jl
     # nash price is a fixed point of the equation p = c + \mu / (1 - (n + exp[(a0 - a + p)/mu])^(-1)) see Anderson and De Palma (1992)
@@ -216,14 +216,13 @@ def main():
         return (p - c) * np.exp((ai - p) / mu) / (n_agents * np.exp((ai - p) / mu) + np.exp(a0 / mu))
     def grad_f(f, x, h=1e-10):
         return (f(x + h) - f(x - h)) / (2 * h)
-    print(np.abs(grad_f(profit_symm, coop_price)))
     while np.abs(grad_f(profit_symm, coop_price)):
         coop_price += 1e-5 * grad_f(profit_symm, coop_price)
-        print(coop_price)
 
     print(f"No. of agents = {n_agents}. Nash price = {nash_price:.4f}. Cooperation price = {coop_price:.4f}")
-    min_price = nash_price - 0.1
-    max_price = coop_price + 0.1
+    xi = 0.1
+    min_price = nash_price - xi
+    max_price = coop_price + xi
     for session in range(len(SEEDS)):
         fpostfix = SEEDS[session]
         # Random seeds
@@ -276,7 +275,7 @@ def main():
                         rew=profits[i].cpu(),
                         obs2=price.cpu(),
                     )
-                    if (t - 3) % CKPT_T == 0:
+                    if t % CKPT_T == 0:
                         agents[i].checkpoint(fpostfix, out_dir, t, i)
             if t > 1:
                 for i in range(n_agents):
