@@ -203,14 +203,14 @@ def main():
     #SEEDS=[6299,9397,7986,9865,10500,4875,10706,7213,4124,2250,6300,7129,5699,3450,4059,8667,5174,6889,3071,3286,6194,1665,4538,2217,9482,5592,2642,10421,4395,9911,4780,7462,6402,10471,4376,9788,2727,6906,3633,5876,10703,10954,4912,1822,5997,5153,3795,2275,4497,7908,8828,] # 2nd run
     # Equilibrium price computation by Massimiliano Furlan
     # https://github.com/massimilianofurlangit/algorithmic_pricing/blob/main/functions.jl
-    # nash price is a fixed point of the equation p = c + \mu / (1 - (n + exp[(a0 - a + p)/mu]))^(-1) see Anderson and De Palma (1992)
+    # nash price is a fixed point of the equation p = c + \mu / (1 - (n + exp[(a0 - a + p)/mu])^(-1)) see Anderson and De Palma (1992)
     print("Computing equilibrium prices...")
     def f(p):
         return c + mu/(1 - (n_agents + np.exp((a0 - ai + p) / mu)) ** (-1))
     nash_price = ai
     while np.abs(nash_price - f(nash_price)) > 1e-8:
         nash_price = f(nash_price)
-    # coop price maximizes the firms' joint profits (here I assume symmetry, and solve single-agent problem)
+    # coop price maximizes the firms' joint profits (here I assume symmetry, and solve the single-agent problem)
     coop_price = ai
     def profit_symm(p):
         return (p - c) * np.exp((ai - p) / mu) / (n_agents * np.exp((ai - p) / mu) + np.exp(a0 / mu))
