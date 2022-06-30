@@ -17,7 +17,7 @@ class SquashedGaussianMLPActor(nn.Module):
         self.t = 0
 
     def forward(self, obs, deterministic=False, with_logprob=True):
-        x = self.net(obs)
+        x = self.net(obs.float())
         mu = self.mu(x)
 
         # Pre-squash distribution and sample
@@ -33,11 +33,11 @@ class SquashedGaussianMLPActor(nn.Module):
             u, a = dist.rsample_with_pre_tanh_value()
 
         if with_logprob:
-            logp_pi = dist.log_prob(value=a, pre_tanh_value=u)
+            logp_pi = dist.log_prob(value=a, pre_tanh_value=u).double()
         else:
             logp_pi = None
 
-        return a, logp_pi
+        return a.double(), logp_pi
 
 
 class MLPQFunction(nn.Module):
@@ -49,9 +49,10 @@ class MLPQFunction(nn.Module):
         self.net = nn.Sequential(fc1, activation(), fc2, activation(), out)
 
     def forward(self, obs, act):
-        q = self.net(torch.cat([obs, act], dim=-1))
+        x = torch.cat([obs, act], dim=-1)
+        q = self.net(x.float())
         q = F.softplus(q)
-        return torch.squeeze(q, -1)  # Critical to ensure q has the right shape
+        return torch.squeeze(q, -1).double()  # Critical to ensure q has the right shape
 
 
 class MLPActorCritic(nn.Module):

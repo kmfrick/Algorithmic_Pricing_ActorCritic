@@ -8,19 +8,13 @@ from torch.distributions.independent import Independent
 
 from cycler import cycler
 
-ai = 2.0
-a0 = 0
-mu = 0.25
-c = 1
-
-
 def profit_torch(ai, a0, mu, c, p):
     q = torch.exp((ai - p) / mu) / (torch.sum(torch.exp((ai - p) / mu)) + np.exp(a0 / mu))
     pi = (p - c) * q
     return pi
 
 
-def profit_numpy(p):
+def profit_numpy(ai, a0, mu, c, p):
     q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
     pi = (p - c) * q
     return pi
@@ -68,8 +62,8 @@ def scale_price_sigmoid(price, c, d=None):
     if d is None:
         return price * c + c
     else:
-        if c > d:
-            c, d = d, c
+        if torch.any(c > d):
+            raise ValueError("min > max")
         return price * (d - c) + c
 
 

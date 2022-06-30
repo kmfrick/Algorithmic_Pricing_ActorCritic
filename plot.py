@@ -157,7 +157,7 @@ def main():
         return (x - nash) / (coop - nash)
 
     for t_da in range(1, 8):
-        t_max = t_da * 10000 + 3
+        t_max = t_da * 10000
         r = []
         last_prof_gains = {}
         prof_gains_start_meas_t = t_max - args.movavg_span
@@ -276,7 +276,8 @@ def main():
                         )
                         if args.plot_intermediate:
                             for i in range(n_agents):
-                                plt.scatter(list(range(dev_t - 1, ir_periods)), price_history[i, (dev_t - 1):ir_periods], s=16)
+                                price_series = price_history[i, (dev_t - 1):ir_periods]
+                                plt.scatter(list(range(len(price_series))), price_series, s = 16)
                             plt.legend(leg)
                             for i in range(n_agents):
                                 plt.plot(price_history[i, (dev_t - 1):ir_periods], linestyle="dashed")
