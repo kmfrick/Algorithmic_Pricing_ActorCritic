@@ -175,6 +175,7 @@ def main():
     parser.add_argument("--device", type=int, help="CUDA device")
     parser.add_argument("--n_agents", type=int, help="Number of agents")
     parser.add_argument("--ai_last", type=float, help="Last agent's demand parameter")
+    parser.add_argument("--demand_std", type=float, help="Standard deviation of a0 (for stochastic demand). Will be ignored if 0 or negative.", default=0)
     args = parser.parse_args()
     torch.cuda.set_device(args.device)
     n_agents = args.n_agents
@@ -185,6 +186,7 @@ def main():
         ai = [2.0] * n_agents
     ai = np.array(ai)
     a0 = 0
+    a0_std = args.demand_std
     mu = 0.25
     c = 1
     MAX_T = int(8e4)
@@ -284,6 +286,10 @@ def main():
                         action[i] = agents[i].act(state).squeeze()
                 price = scale_price(action, min_price, max_price)
                 price_history[:, t] = price
+                if args.demand_std > 0:
+                    a0_cur = np.random.normal(a0, a0_std)
+                else:
+                    a0_cur = a0
                 profits = profit_torch(ai, a0, mu, c, price)
                 profit_history[:, t] = profits
                 for i in range(n_agents):
