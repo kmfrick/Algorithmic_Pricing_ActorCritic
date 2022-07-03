@@ -73,7 +73,7 @@ def main():
     os.makedirs(f"{out_dir}_plots", exist_ok=True)
     deviation_types = ["nash", "br", "coop", "cost"]
     if args.parse_csv:
-        df = pd.read_csv("experiments_new.csv")
+        df = pd.read_csv(args.filename)
         df = df.drop(df.columns[[0, 1]], axis=1)
         df["dev_profit_percent_coop"] = None
         df["dev_profit_percent_cost"] = None
@@ -97,20 +97,22 @@ def main():
         for dtype in deviation_types:
             df[f"unprofitable_dev_diff_{dtype}"]  = (df[f"dev_profit_diff_{dtype}"] <  0).astype(int)
             df[f"unprofitable_dev_percent_{dtype}"]  = (df[f"dev_profit_percent_{dtype}"] <  0).astype(int)
+        # Interesting dtype: best-response
+        dtype = "br"
         for t in df.t.unique():
           df_s = df.loc[df.t == t,:]
           plt.hist(df_s["profit_gain"], align="left")
-          plt.xlabel(f"Profit gains (t = {t - 3})")
+          plt.xlabel(f"Profit gains (t = {t})")
           sns.despine()
           plt.savefig(f"{out_dir}_plots/pg_hist_t{t}.svg")
           plt.clf()
-          plt.hist(df_s["differential_deviation_profit"], align="left")
-          plt.xlabel(f"Differential deviation profit (t = {t - 3}, $\gamma$ = {args.discount})")
+          plt.hist(df_s[f"dev_profit_diff_{dtype}"], align="left")
+          plt.xlabel(f"Differential deviation profit (t = {t})")
           sns.despine()
           plt.savefig(f"{out_dir}_plots/diff_dev_prof_hist_t{t}.svg")
           plt.clf()
-          plt.hist(df_s["deviation_profit_percent"], align="left")
-          plt.xlabel(f"Discounted deviatiion profit (t = {t - 3}, $\gamma$ = {args.discount})")
+          plt.hist(df_s[f"dev_profit_percent_{dtype}"], align="left")
+          plt.xlabel(f"Discounted deviatiion profit (t = {t}, $\gamma$ = {args.discount})")
           sns.despine()
           plt.savefig(f"{out_dir}_plots/disc_dev_prof_hist_t{t}.svg")
           plt.clf()
@@ -148,8 +150,8 @@ def main():
     min_price = nash_price - xi
     max_price = coop_price + xi
 
-    nash = profit_numpy(np.ones(n_agents) * nash_price)
-    coop = profit_numpy(np.ones(n_agents) * coop_price)
+    nash = profit_numpy(ai, a0, mu, c, np.ones(n_agents) * nash_price)
+    coop = profit_numpy(ai, a0, mu, c, np.ones(n_agents) * coop_price)
     ir_periods = 30
     dev_t = ir_periods // 2
     df = pd.DataFrame()
@@ -185,7 +187,7 @@ def main():
                 raw_out = np.load(f"{out_dir}/session_prices_{seed}.npy")
                 raw_out = raw_out[:, :t_max]
                 if np.min(raw_out) > c:  # It's prices
-                    profits_cur = np.apply_along_axis(profit_numpy, 0, raw_out)
+                    profits_cur = np.apply_along_axis(lambda x : profit_numpy(ai, a0, mu, c, x), 0, raw_out)
                 if args.plot_intermediate:
                     plot_profits(n_agents, profits_cur, pg, args.movavg_span)
                     sns.despine()
@@ -233,17 +235,18 @@ def main():
                         nondev_profit = 0
                         leg = ["Non-deviating agent"] * n_agents
                         leg[j] = "Deviating agent"
+                        avg_rew = np.zeros(n_agents)
                         for t in range(ir_profit_periods):
                             for i in range(n_agents):
                                 action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
                                 price[i] = scale_price(action, min_price, max_price)
                             if t >= dev_t:
-                                nondev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - dev_t)
+                                nondev_profit += profit_numpy(ai, a0, mu, c, price.numpy())[j] * args.discount ** (t - dev_t)
                             price_history[:, t] = price.detach()
                             state = price
                             conv_price = price.clone().numpy()
-                            avg_rew = profit_numpy(conv_price)
-
+                            avg_rew += profit_numpy(ai, a0, mu, c, conv_price)
+                        avg_rew /= ir_profit_periods
                         # Now compute deviation profits
                         dev_profit = 0
                         state = initial_state.clone()
@@ -260,15 +263,15 @@ def main():
                                 elif deviation_type == "cost":
                                     br = c
                                 else:
-                                    br = grad_desc(profit_numpy, price.clone().numpy(), j)
+                                    br = grad_desc(lambda x : profit_numpy(ai, a0, mu, c, x), price.clone().numpy(), j)
                                 price[j] = torch.tensor(br)
                             if t >= dev_t:
-                                dev_profit += profit_numpy(price.numpy())[j] * args.discount ** (t - dev_t)
+                                dev_profit += profit_numpy(ai, a0, mu, c, price.numpy())[j] * args.discount ** (t - dev_t)
                             price_history[:, t] = price
                             state = price
                         dev_gain = (dev_profit / nondev_profit - 1) * 100
                         avg_dev_gain[deviation_type] += dev_gain
-                        dev_diff_profit = (np.apply_along_axis(profit_numpy, 0, price_history).T - avg_rew).T.sum(axis=1)[j]
+                        dev_diff_profit = (np.apply_along_axis(lambda x : profit_numpy(ai, a0, mu, c, x), 0, price_history).T - avg_rew).T.sum(axis=1)[j]
                         avg_dev_diff_profit[deviation_type] += dev_diff_profit
                         print(f"Deviation differential profits = {dev_diff_profit} (non-dev is 0)")
                         print(
