@@ -2,6 +2,24 @@
 
 Code for my master's thesis work on algorithmic pricing in continuous environments.
 
+## License
+
+This code is released under the terms of the GNU Affero General Public License.
+If you use any of this in your own research, or take inspiration from it to develop a derivative work, please cite my thesis:
+
+```
+@mastersthesis{frick_autonomous_2022,
+author = "Kevin Michael Frick",
+title = "Autonomous Pricing using Policy Gradient Reinforcement Learning",
+school = "Bologna University",
+year = 2022,
+address = "Bologna, Italy",
+month = jul
+}
+```
+
+## Main code
+
 To run an experiment:
 
 ```
@@ -16,6 +34,8 @@ optional arguments:
   --ai_last AI_LAST        Last agent's demand parameter
   --demand_std DEMAND_STD  Standard deviation of a0 (for stochastic demand). Will be ignored if 0 or negative.
 ```
+
+## Plotting
 
 To plot profits, state-action heatmaps and impulse responses:
 
@@ -39,18 +59,4 @@ optional arguments:
                         Moving average span
   --parse_csv
   --n_agents N_AGENTS   Number of agents
-```
-
-This code is released under the terms of the GNU Affero General Public License.
-If you use any of this in your own research, or take inspiration from it to develop a derivative work, please cite my thesis:
-
-```
-@mastersthesis{frick_autonomous_2022,
-author = "Kevin Michael Frick",
-title = "Autonomous Pricing using Policy Gradient Reinforcement Learning",
-school = "Bologna University",
-year = 2022,
-address = "Bologna, Italy",
-month = jul
-}
 ```
