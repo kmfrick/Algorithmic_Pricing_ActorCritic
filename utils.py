@@ -32,7 +32,7 @@ def profit_torch(ai, a0, mu, c, p):
 def profit_numpy(ai, a0, mu, c, p):
     q = np.exp((ai - p) / mu) / (np.sum(np.exp((ai - p) / mu)) + np.exp(a0 / mu))
     pi = (p - c) * q
-    return pi
+    return pi.squeeze()
 
 
 # https://cs231n.github.io/optimization-1/#gradcompute
@@ -66,9 +66,12 @@ def df(f, x):
 
 
 def grad_desc(f, x, i, thresh=1e-5, lr=1e-4, maxit=int(1e5)):
+    x = x.squeeze()
     it = 0
-    while np.abs(df(f, x))[i] > thresh and it < maxit:
-        x[i] += lr * df(f, x)[i]
+    p = df(f, x).squeeze()
+    while np.abs(p[i]) > thresh and it < maxit:
+        p = df(f, x).squeeze()
+        x[i] += lr * p[i]
         it += 1
     return x[i]
 
@@ -77,7 +80,7 @@ def scale_price_sigmoid(price, c, d=None):
     if d is None:
         return price * c + c
     else:
-        if torch.any(c > d):
+        if (c > d).any(): # Torch/NumPy portability
             raise ValueError("min > max")
         return price * (d - c) + c
 

@@ -45,7 +45,7 @@ def plot_heatmap(arr,  min_price, max_price, w=100):
         im = plt.imshow(
             a.reshape([w, w]),
             cmap="Reds",
-            extent=(min_price, max_price, min_price, max_price),
+            extent=(min_price[0], max_price[0], min_price[1], max_price[1]),
             aspect="auto",
             origin="lower",
         )
@@ -83,8 +83,22 @@ def main():
     parser.add_argument("--movavg_span", type=int, help="Moving average span", default=1000)
     parser.add_argument("--parse_csv", action="store_const", const=True, default=False)
     parser.add_argument("--n_agents", type=int, help="Number of agents")
+    parser.add_argument("--ai_last", type=float, help="Last agent's demand parameter")
+    parser.add_argument("--demand_std", type=float, help="Standard deviation of a0 (for stochastic demand). Will be ignored if 0 or negative.", default=0)
     args = parser.parse_args()
     out_dir = args.out_dir
+    n_agents = args.n_agents
+    if args.ai_last is not None:
+        ai = [2.0] * (n_agents - 1)
+        ai += [args.ai_last]
+    else:
+        ai = [2.0] * n_agents
+    ai = np.array(ai)
+    a0 = 0
+    a0_std = args.demand_std
+    mu = 0.25
+    c = 1
+
     # Create output directory
     os.makedirs(f"{out_dir}_plots", exist_ok=True)
     deviation_types = ["nash", "br", "coop", "cost"]
@@ -136,36 +150,39 @@ def main():
 
 
 
-
-    n_agents = args.n_agents
-    ai = 2
-    a0 = 0
-    mu = 0.25
-    c = 1
     # Equilibrium price computation by Massimiliano Furlan
     # https://github.com/massimilianofurlangit/algorithmic_pricing/blob/main/functions.jl
-    # nash price is a fixed point of the equation p = c + \mu / (1 - (n + exp[(a0 - a + p)/mu]))^(-1) see Anderson and De Palma (1992)
+    # Nash price is the price at which all firms are best-responding to each other
+    # Cooperation price maximizes the firms' joint profits
     print("Computing equilibrium prices...")
-    def f(p):
-        return c + mu/(1 - (n_agents + np.exp((a0 - ai + p) / mu)) ** (-1))
-    nash_price = ai
-    while np.abs(nash_price - f(nash_price)) > 1e-8:
-        nash_price = f(nash_price)
-    # coop price maximizes the firms' joint profits (here I assume symmetry, and solve single-agent problem)
-    coop_price = ai
-    def profit_symm(p):
-        return (p - c) * np.exp((ai - p) / mu) / (n_agents * np.exp((ai - p) / mu) + np.exp(a0 / mu))
-    def grad_f(f, x, h=1e-10):
-        return (f(x + h) - f(x - h)) / (2 * h)
-    print(np.abs(grad_f(profit_symm, coop_price)))
-    while np.abs(grad_f(profit_symm, coop_price)):
-        coop_price += 1e-5 * grad_f(profit_symm, coop_price)
-
-    print(f"No. of agents = {n_agents}. Nash price = {nash_price:.4f}. Cooperation price = {coop_price:.4f}")
+    nash_price = np.copy(ai)
+    coop_price = np.copy(ai)
+    def Ix(i, x): 
+        return np.array([x if i == j else 0 for j in range(n_agents)])
+    def grad_profit(i, ai, a0, mu, c, p, h=1e-8):
+        return (profit_numpy(ai, a0, mu, c, p + Ix(i, h))[i] - profit_numpy(ai, a0, mu, c, p - Ix(i, h))[i]) / (2 * h)
+    def joint_profit(ai, a0, mu, c, p): 
+        return np.sum(profit_numpy(ai, a0, mu, c, p)) 
+    def grad_joint_profit(ai, a0, mu, c, p, h = 1e-8):
+        return (joint_profit(ai, a0, mu, c, p + h) - joint_profit(ai, a0, mu, c, p - h)) / (2 * h)
+    while True:
+        nash_price_ = np.copy(nash_price)
+        for i in range(n_agents):
+            df = grad_profit(i, ai, a0, mu, c, nash_price)
+            while np.abs(df) > 1e-8:
+                nash_price[i] += 1e-3 * df
+                df = grad_profit(i, ai, a0, mu, c, nash_price)
+        if np.any(nash_price_ - nash_price) < 1e-8:
+            break
+    df = grad_joint_profit(ai, a0, mu, c, coop_price)
+    while np.abs(df) > 1e-7:
+        lr = 0.01
+        coop_price += lr * df
+        df = grad_joint_profit(ai, a0, mu, c, coop_price)
+    print(f"No. of agents = {n_agents}. Nash price = {nash_price}. Cooperation price = {coop_price}")
     xi = 0.1
     min_price = nash_price - xi
-    max_price = coop_price + xi
-
+    max_price = nash_price + xi
     nash = profit_numpy(ai, a0, mu, c, np.ones(n_agents) * nash_price)
     coop = profit_numpy(ai, a0, mu, c, np.ones(n_agents) * coop_price)
     ir_periods = 30
@@ -223,15 +240,16 @@ def main():
 
                 if n_agents == 2:
                     # Create and plot state-action map
-                    w = torch.linspace(min_price, max_price, args.grid_size, requires_grad=False)
-                    A = [np.zeros([args.grid_size, args.grid_size]) for i in range(n_agents)]
                     print("Computing state-action map...")
+                    A = [np.zeros([args.grid_size, args.grid_size]) for i in range(n_agents)]
                     for i in range(n_agents):
-                        for a_i, p1 in enumerate(w):
-                            for a_j, p2 in enumerate(w):
+                        w1 = torch.linspace(min_price[0], max_price[0], args.grid_size, requires_grad=False)
+                        w2 = torch.linspace(min_price[1], max_price[1], args.grid_size, requires_grad=False)
+                        for a_i, p1 in enumerate(w1):
+                            for a_j, p2 in enumerate(w2):
                                 state = torch.tensor([[p1, p2]])
                                 action, _ = actor[i](state, deterministic=True, with_logprob=False)
-                                a = scale_price(action, min_price, max_price).detach()
+                                a = scale_price(action, min_price[i], max_price[i]).detach()
                                 # print(f"{state} -> {a}")
                                 A[i][a_i, a_j] = a.numpy()
                     state_action_maps.append(A)
@@ -253,38 +271,35 @@ def main():
                         leg[j] = "Deviating agent"
                         avg_rew = np.zeros(n_agents)
                         for t in range(ir_profit_periods):
-                            for i in range(n_agents):
-                                action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
-                                price[i] = scale_price(action, min_price, max_price)
+                            action = np.array([actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)[0].item() for i in range(n_agents)])
+                            price = scale_price(action, min_price, max_price)
                             if t >= dev_t:
-                                nondev_profit += profit_numpy(ai, a0, mu, c, price.numpy())[j] * args.discount ** (t - dev_t)
-                            price_history[:, t] = price.detach()
-                            state = price
-                            conv_price = price.clone().numpy()
+                                nondev_profit += profit_numpy(ai, a0, mu, c, price)[j] * args.discount ** (t - dev_t)
+                            price_history[:, t] = price
+                            state = torch.tensor(price)
+                            conv_price = price.copy()
                             avg_rew += profit_numpy(ai, a0, mu, c, conv_price)
                         avg_rew /= ir_profit_periods
                         # Now compute deviation profits
                         dev_profit = 0
                         state = initial_state.clone()
                         for t in range(ir_profit_periods):
-                            for i in range(n_agents):
-                                action, _ = actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)
-                                price[i] = scale_price(action, min_price, max_price)
-                                orig_price = price[j].item()
+                            action = np.array([actor[i](state.unsqueeze(0), deterministic=True, with_logprob=False)[0].item() for i in range(n_agents)])
+                            price = scale_price(action, min_price, max_price)
                             if t == dev_t:
                                 if deviation_type == "nash":
-                                    br = nash_price
+                                    br = nash_price[j]
                                 elif deviation_type == "coop":
-                                    br = coop_price
+                                    br = coop_price[j]
                                 elif deviation_type == "cost":
                                     br = c
                                 else:
-                                    br = grad_desc(lambda x : profit_numpy(ai, a0, mu, c, x), price.clone().numpy(), j)
-                                price[j] = torch.tensor(br)
+                                    br = grad_desc(lambda x : profit_numpy(ai, a0, mu, c, x), price.copy(), j)
+                                price[j] = br
                             if t >= dev_t:
-                                dev_profit += profit_numpy(ai, a0, mu, c, price.numpy())[j] * args.discount ** (t - dev_t)
+                                dev_profit += profit_numpy(ai, a0, mu, c, price)[j] * args.discount ** (t - dev_t)
                             price_history[:, t] = price
-                            state = price
+                            state = torch.tensor(price)
                         dev_gain = (dev_profit / nondev_profit - 1) * 100
                         avg_dev_gain[deviation_type] += dev_gain
                         dev_diff_profit = (np.apply_along_axis(lambda x : profit_numpy(ai, a0, mu, c, x), 0, price_history).T - avg_rew).T.sum(axis=1)[j]
@@ -300,9 +315,9 @@ def main():
                             plt.legend(leg)
                             for i in range(n_agents):
                                 plt.plot(price_history[i, (dev_t - 1):ir_periods], linestyle="dashed")
-                            plt.ylim(min_price, max_price)
+                            plt.ylim(min_price[j], max_price[j])
                             sns.despine()
-                            plt.savefig(f"{out_dir}_plots/{seed}_ir_{deviation_type}_t{t_max}.svg")
+                            plt.savefig(f"{out_dir}_plots/{seed}_ir_{deviation_type}_t{t_max}_agent{j}.svg")
                             plt.clf()
                         ir_arrays_defector[deviation_type].append(price_history[j, :ir_periods])
                         for i in range(n_agents):
