@@ -315,7 +315,7 @@ def main():
                             plt.legend(leg)
                             for i in range(n_agents):
                                 plt.plot(price_history[i, (dev_t - 1):ir_periods], linestyle="dashed")
-                            plt.ylim(min_price[j], max_price[j])
+                            plt.ylim(np.min(min_price), np.max(max_price))
                             sns.despine()
                             plt.savefig(f"{out_dir}_plots/{seed}_ir_{deviation_type}_t{t_max}_agent{j}.svg")
                             plt.clf()
@@ -403,9 +403,10 @@ def main():
             plt.legend(leg)
             plt.plot(ir_mean_compliant, linestyle="dashed")
             plt.plot(ir_mean_defector, linestyle="dashed")
-            plt.axhline(nash_price)
-            plt.axhline(coop_price)
-            plt.ylim(min_price, max_price)
+            for i in range(n_agents):
+                plt.axhline(nash_price[i], c=f"C{i}")
+                plt.axhline(coop_price[i], c=f"C{i}")
+            plt.ylim(np.min(min_price), np.max(max_price))
             sns.despine()
             plt.savefig(f"{out_dir}_plots/avg_ir_{deviation_type}_t{t_max}.svg")
             plt.clf()

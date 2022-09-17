@@ -50,14 +50,11 @@ print.multi.t.table <- function(data, caption, label, group.by, round = 3) {
 }
 
 main <- function() {
-  df <- read.csv("results/experiments_4agents.csv")
+  df <- read.csv("results/experiments_2agents.csv")
   suffix <- "."
-  suffix.label <- "4ag"
+  suffix.label <- ""
   df <- df[,3:ncol(df)]
-  print(mean(df$profit_gain))
-  print(median(df$profit_gain))
-  hist(df$profit_gain)
-  return()
+
 
   # Compute outliers
   Q1.pg <- quantile(df$profit_gain, .25)
