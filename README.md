@@ -8,7 +8,8 @@ This code is released under the terms of the GNU Affero General Public License.
 If you use any of this in your own research, or take inspiration from it to develop a derivative work, please cite my working paper:
 
 ```
-Frick, Kevin Michael, Convergence Rates and Collusive Outcomes of Pricing Algorithms (February 12, 2023). Available at SSRN: https://ssrn.com/abstract=4527452 or http://dx.doi.org/10.2139/ssrn.4527452
+Frick, Kevin Michael, Convergence Rates and Collusive Outcomes of Pricing Algorithms (February 12, 2023).
+Available at SSRN: https://ssrn.com/abstract=4527452 or http://dx.doi.org/10.2139/ssrn.4527452
 ```
 
 ## Main code
